@@ -153,24 +153,26 @@ ladder, the join and reconnect paths, and the numbers to tune are in
 This is a partially built repository. The list below is accurate as of the current
 commit; do not assume a feature exists because the plan describes it.
 
-**In the repository today:** Phases 1–3 are complete. You can sign up, create a room,
+**In the repository today:** Phases 1–4 are complete. You can sign up, create a room,
 share the code, have someone join it, and see live presence — on desktop and mobile.
 The schema is applied by a real migration and the auth and room flows have been
 verified end to end against PostgreSQL 18 and Redis 7.2, not just typechecked.
 
-What you cannot do yet is the thing the product exists for: **there is no video
-player.** The whole server half of synchronized playback is built and unit-tested;
-the browser half is Phase 4.
+You can also paste a YouTube link and watch it **in sync** — play, pause and seek
+propagate to everyone, late joiners land in the right place, and a client that falls
+behind is corrected automatically.
+
+What is missing now is everything social around the video: **no chat, no voice, no
+shared notes.** Those are Phases 5, 6 and 7.
 
 **Not implemented yet.** This table is the authoritative statement of what is missing:
 
 | Area | Phase in PLAN.md §14 | Status |
 |---|---|---|
-| Synchronized video playback — client half | Phase 4 | **Client not started, and it is the next thing to build.** The server half is done and tested: `packages/shared/src/video.ts`, `apps/realtime/src/handlers/video.ts`, and the Lua transact in `apps/realtime/src/scripts/transactVideo.lua`. `apps/web/lib/sync/clock.ts` already implements the §8.3 clock. Missing: the `PlayerAdapter`, the drift loop, and the control bar. The room page shows an honest empty state until then. |
+| Synchronized video playback | Phase 4 | **Done.** Measured against the §15.3 simulator: spread p50 0.138s / p95 0.255s, 2.19 hard seeks per client-hour, no permanent divergence. `pnpm --filter @syncstudy/web test` runs it in under 3s and is the regression gate. |
 | Chat | Phase 5 | Not started. Schema and event types exist and the `chat:*` events are registered and guarded, but they ack `not_implemented`. No UI. |
 | Voice calls and WebRTC | Phase 6 | Not started. coturn is configured and runs locally, and the `rtc:*` events are registered and rate-limited, but they ack `not_implemented` — no signalling relay and no peer connections. |
 | Shared notes, questions, checklist | Phase 7 | Not started. |
-| The sync simulator (PLAN.md §15.3) | Phase 4 | Not started. This is the highest-leverage test asset in the project and should be built with the sync engine, not after it. |
 | Integration tests (Testcontainers) and E2E (Playwright) | Phases 3–9 | Not started. CI already runs Postgres and Redis service containers so these are a new file, not a CI change. |
 | Deployment to Vercel/Fly/Neon/Upstash | Phase 10 | Config is written (`infra/fly.realtime.toml`); nothing is deployed. |
 

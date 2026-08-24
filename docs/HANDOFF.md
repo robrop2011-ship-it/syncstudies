@@ -65,7 +65,7 @@ Lucide icons instead of emoji, no rounded-full buttons. There is a grep-able aud
 | 1 — Foundation | **Done.** pnpm monorepo, strict TS, CI, Docker + no-Docker dev paths |
 | 2 — Accounts | **Done and verified against real Postgres.** Username + password, no email (ADR 0001), one-time recovery codes, sessions, profile/privacy/account settings |
 | 3 — Rooms | **Done and verified end to end.** Rooms REST API, room page, client socket layer, `ServerClock`, presence, host controls |
-| 4 — Video sync | **See §4.** |
+| 4 — Video sync | **Done, measured, and verified in a browser.** See §4 for the numbers |
 | 5 — Chat | Not started. Socket handlers registered, guarded and rate-limited; they ack `not_implemented` |
 | 6 — Voice/WebRTC | Not started. coturn config written and hardened; `rtc:*` handlers ack `not_implemented` |
 | 7 — Study tools | Not started. Schema exists |
