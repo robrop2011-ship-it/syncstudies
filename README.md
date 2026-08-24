@@ -153,19 +153,20 @@ ladder, the join and reconnect paths, and the numbers to tune are in
 This is a partially built repository. The list below is accurate as of the current
 commit; do not assume a feature exists because the plan describes it.
 
-**In the repository today:** Phase 1 (workspace, tooling, CI) and Phase 2 (accounts,
-sessions, recovery codes, profile and settings pages) are complete. Phase 3 is
-**partially** landed: the realtime service implements room join/leave/resync,
-presence, host controls and the authoritative video timeline, but there is no room
-page and no rooms REST API yet — the dashboard reads Postgres directly.
+**In the repository today:** Phases 1–3 are complete. You can sign up, create a room,
+share the code, have someone join it, and see live presence — on desktop and mobile.
+The schema is applied by a real migration and the auth and room flows have been
+verified end to end against PostgreSQL 18 and Redis 7.2, not just typechecked.
+
+What you cannot do yet is the thing the product exists for: **there is no video
+player.** The whole server half of synchronized playback is built and unit-tested;
+the browser half is Phase 4.
 
 **Not implemented yet.** This table is the authoritative statement of what is missing:
 
 | Area | Phase in PLAN.md §14 | Status |
 |---|---|---|
-| Room page (`/r/[code]`) and room creation UI | Phase 3 | **Not started.** The dashboard already links to `/r/{code}` and `/rooms/new`; both are 404 today. |
-| Rooms REST API (create / list / preview / join / patch / delete) | Phase 3 | **Not started.** `app/(app)/dashboard/page.tsx` queries Prisma directly in the meantime. |
-| Synchronized video playback — client half | Phase 4 | **Client not started.** The server half is done: `packages/shared/src/video.ts` (unit-tested), `apps/realtime/src/handlers/video.ts`, and the Redis transact in `apps/realtime/src/scripts/transactVideo.lua`. What is missing is the browser side — the `PlayerAdapter`, the clock sync, and the drift loop. |
+| Synchronized video playback — client half | Phase 4 | **Client not started, and it is the next thing to build.** The server half is done and tested: `packages/shared/src/video.ts`, `apps/realtime/src/handlers/video.ts`, and the Lua transact in `apps/realtime/src/scripts/transactVideo.lua`. `apps/web/lib/sync/clock.ts` already implements the §8.3 clock. Missing: the `PlayerAdapter`, the drift loop, and the control bar. The room page shows an honest empty state until then. |
 | Chat | Phase 5 | Not started. Schema and event types exist and the `chat:*` events are registered and guarded, but they ack `not_implemented`. No UI. |
 | Voice calls and WebRTC | Phase 6 | Not started. coturn is configured and runs locally, and the `rtc:*` events are registered and rate-limited, but they ack `not_implemented` — no signalling relay and no peer connections. |
 | Shared notes, questions, checklist | Phase 7 | Not started. |
