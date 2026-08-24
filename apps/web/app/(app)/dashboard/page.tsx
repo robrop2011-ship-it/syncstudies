@@ -1,9 +1,11 @@
 /**
  * The dashboard: recent rooms, and the two things anyone comes here to do.
  *
- * Rooms have no REST surface until Phase 3, so this reads Postgres directly. It
- * is a server component, so that is a query on the render path rather than an
- * API call the browser has to wait for.
+ * Reads Postgres directly rather than calling its own REST API: this is a server
+ * component, so a query on the render path beats an API round-trip the browser
+ * has to wait for. It goes through the SAME select and mapper the API uses
+ * (`ROOM_SUMMARY_SELECT` / `toRoomSummary`), so the two can never disagree about
+ * the shape of a room.
  */
 import type { Metadata } from 'next';
 import Link from 'next/link';
@@ -11,8 +13,9 @@ import { Plus } from 'lucide-react';
 import { prisma } from '@syncstudy/db';
 import { Button } from '@/components/ui/button';
 import { JoinRoomForm } from '@/components/app/join-room-form';
-import { RoomList, type RoomSummary } from '@/components/app/room-list';
+import { RoomList } from '@/components/app/room-list';
 import { requireSession } from '@/lib/server/session';
+import { ROOM_SUMMARY_SELECT, toRoomSummary, type RoomSummary } from '@/lib/server/rooms';
 
 export const metadata: Metadata = {
   title: 'Rooms',
@@ -35,31 +38,16 @@ export default async function DashboardPage() {
     orderBy: { lastActiveAt: 'desc' },
     take: RECENT_LIMIT,
     select: {
-      id: true,
-      code: true,
-      name: true,
-      topic: true,
-      hostId: true,
-      maxParticipants: true,
-      lastActiveAt: true,
-      host: { select: { displayName: true } },
-      // Counted in JS rather than with a filtered `_count`: the row cap above
-      // keeps this to a few dozen ids, and it keeps the query boring.
-      participants: { where: { leftAt: null }, select: { userId: true } },
+      ...ROOM_SUMMARY_SELECT,
+      // The viewer's own membership row, so the mapper can resolve their role
+      // without a second query per room.
+      participants: { where: { userId }, select: { role: true }, take: 1 },
     },
   });
 
-  const rooms: RoomSummary[] = rows.map((room) => ({
-    id: room.id,
-    code: room.code,
-    name: room.name,
-    topic: room.topic,
-    hostId: room.hostId,
-    hostName: room.host.displayName,
-    maxParticipants: room.maxParticipants,
-    occupancy: room.participants.length,
-    lastActiveAt: room.lastActiveAt,
-  }));
+  const rooms: RoomSummary[] = rows.map((row) =>
+    toRoomSummary(row, userId, row.participants[0]?.role ?? null),
+  );
 
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6">
