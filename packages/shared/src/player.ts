@@ -10,6 +10,23 @@ export type PlayerState = 'unstarted' | 'ended' | 'playing' | 'paused' | 'buffer
 
 export type PlayerEvent = 'statechange' | 'ready' | 'error' | 'ratechange';
 
+/**
+ * Synthetic error codes an adapter may emit on the `error` channel to report that
+ * playback was REFUSED rather than that the video is broken.
+ *
+ * Negative so they can never collide with YouTube's own (2, 5, 100, 101, 150).
+ * They live here, in the contract, rather than in the YouTube adapter, because
+ * the sync controller has to distinguish them from real video failures and must
+ * not import a browser-only module to do it.
+ */
+export const PLAYER_ERROR_AUTOPLAY_BLOCKED = -1;
+export const PLAYER_ERROR_AUTOPLAY_MUTED = -2;
+
+/** True for the codes above: a gate signal, not a broken video. */
+export function isAutoplayGateCode(code: number): boolean {
+  return code === PLAYER_ERROR_AUTOPLAY_BLOCKED || code === PLAYER_ERROR_AUTOPLAY_MUTED;
+}
+
 export interface PlayerErrorInfo {
   code: number;
   /** True for YouTube 101/150 — the video forbids embedded playback. */

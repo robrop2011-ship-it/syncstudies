@@ -21,7 +21,7 @@
  */
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import type { Role } from '@syncstudy/shared';
+import { canControlVideo, type Role } from '@syncstudy/shared';
 import { RoomSocketProvider } from '@/lib/socket/provider';
 import {
   useConnection,
@@ -37,6 +37,7 @@ import { ConnectionBar } from '@/components/room/ConnectionBar';
 import { ControlBar } from '@/components/room/ControlBar';
 import { RoomClosedScreen } from '@/components/room/RoomClosedScreen';
 import { RoomOverflowMenu } from '@/components/room/HostControls';
+import { PlayerControls } from '@/components/room/PlayerControls';
 import { RoomSidebar } from '@/components/room/RoomSidebar';
 import { RoomTopBar } from '@/components/room/RoomTopBar';
 import { VideoStage } from '@/components/room/VideoStage';
@@ -95,6 +96,15 @@ function RoomFrame({ bootstrap }: { bootstrap: RoomBootstrap }) {
   const playbackControl = policy?.playbackControl ?? bootstrap.playbackControl;
   const myRole: Role = permissions?.role ?? (bootstrap.isHost ? 'host' : 'member');
   const canSetVideo = permissions?.canSetVideo ?? bootstrap.isHost;
+  // Until the snapshot lands, resolve it the same way the server will (§11.2) —
+  // guessing "no" would disable the controls of the person who just opened their
+  // own room for the first 200ms.
+  const canControl = permissions?.canControlVideo ?? canControlVideo(myRole, playbackControl);
+  // The host's name is what §8.5a's "Only Priya can control playback" needs. The
+  // bootstrap value covers the window before presence has arrived.
+  const hostName =
+    participants.find((participant) => participant.id === hostId)?.displayName ??
+    bootstrap.hostName;
 
   const terminal = joinError === null ? undefined : TERMINAL[joinError.code];
   if (terminal !== undefined) {
@@ -138,14 +148,26 @@ function RoomFrame({ bootstrap }: { bootstrap: RoomBootstrap }) {
           'xl:grid-cols-[minmax(0,1fr)_380px]',
         ].join(' ')}
       >
-        {/* Pinned to 16:9 at the top on a phone as a MINIMUM height rather than a
-            fixed ratio: with no player in it, a strict 16:9 box on a 375px phone
-            is 211px tall and clips its own empty state. Phase 4's iframe fills
-            the width and lands on the ratio anyway. */}
-        <VideoStage
-          canSetVideo={canSetVideo}
-          className="col-start-1 row-start-1 min-h-[56.25vw] w-full md:h-full md:min-h-0"
-        />
+        {/* The video column: stage on top, scrubber and transport under it. One
+            grid cell holding a flex column rather than two cells, so the control
+            bar tracks the video's width at every breakpoint without a second set
+            of grid placements to keep in step. */}
+        <div className="col-start-1 row-start-1 flex min-h-0 min-w-0 flex-col">
+          {/* Pinned to 16:9 at the top on a phone as a MINIMUM height rather than
+              a fixed ratio: with no player in it, a strict 16:9 box on a 375px
+              phone is 211px tall and clips its own empty state. The iframe fills
+              the width and lands on the ratio anyway. */}
+          <VideoStage
+            canSetVideo={canSetVideo}
+            loading={loading}
+            className="min-h-[56.25vw] w-full md:min-h-0 md:flex-1"
+          />
+          <PlayerControls
+            canControl={canControl}
+            playbackControl={playbackControl}
+            hostName={hostName}
+          />
+        </div>
 
         <RoomSidebar
           youId={bootstrap.viewer.id}

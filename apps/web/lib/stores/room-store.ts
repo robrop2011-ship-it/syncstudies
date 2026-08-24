@@ -36,6 +36,7 @@ import {
   type RoomView,
   type VideoAnchor,
 } from '@syncstudy/shared';
+import { IDLE_SYNC_STATUS, syncStatusEquals, type SyncStatus } from '@/lib/sync/types';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'failed';
 
@@ -85,6 +86,15 @@ interface RoomData {
   policy: RoomPolicy | null;
   participants: Participant[];
   video: VideoAnchor;
+  /**
+   * How synchronisation is going for THIS client (§8.6).
+   *
+   * Kept in the store rather than in a context of its own so a component that
+   * only reads `quality` re-renders on `quality`, and not on every drift
+   * measurement. The `SyncController` publishes into it and nothing else writes
+   * it; it is the one-way valve between a 2 Hz timer and React.
+   */
+  sync: SyncStatus;
   you: ResolvedPermissions | null;
   connection: ConnectionState;
   joinError: JoinError | null;
@@ -104,6 +114,8 @@ export interface RoomStoreState extends RoomData {
   participantLeft(userId: string): void;
   participantPatched(userId: string, patch: Partial<Participant>): void;
   setVideo(anchor: VideoAnchor): void;
+  /** Published by the SyncController. `null` resets to idle (the player went away). */
+  setSyncStatus(status: SyncStatus | null): void;
   noteControlRejected(reason: ControlRejectReason): void;
   setConnection(status: ConnectionStatus, attempts?: number): void;
   setJoinError(error: JoinError | null): void;
@@ -120,6 +132,7 @@ function initialData(): RoomData {
     policy: null,
     participants: [],
     video: IDLE_ANCHOR,
+    sync: IDLE_SYNC_STATUS,
     you: null,
     // `since: 0`, not `Date.now()`: this object is built during render, and a
     // timestamp there differs between the server pass and the client pass, which
@@ -247,6 +260,15 @@ export function createRoomStore(): RoomStoreApi {
       set({ video: anchor });
     },
 
+    setSyncStatus(status) {
+      const next = status ?? IDLE_SYNC_STATUS;
+      // The controller publishes on change, but "changed" there means "a field
+      // moved"; this is the second gate, and it is the one that keeps a drift
+      // measurement that rounded to the same tenth from re-rendering the room.
+      if (syncStatusEquals(get().sync, next)) return;
+      set({ sync: next });
+    },
+
     noteControlRejected(reason) {
       set({ controlRejection: { reason, at: Date.now() } });
     },
@@ -350,6 +372,17 @@ export function useJoinError(): JoinError | null {
 
 export function useVideoAnchor(): VideoAnchor {
   return useRoomStore((s) => s.video);
+}
+
+/**
+ * The last control the server refused (§8.5d).
+ *
+ * Render it as a 2-second inline pill under the player — "Aditya just changed
+ * the video" — never as a red error and never as a modal. `at` changes on every
+ * rejection, so the same reason twice in a row is still two distinct values.
+ */
+export function useControlRejection(): ControlRejection | null {
+  return useRoomStore((s) => s.controlRejection);
 }
 
 /** `sys:notice` — server-initiated, transient. Render it as a toast, then clear it. */

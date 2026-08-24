@@ -1,56 +1,214 @@
 'use client';
 
 /**
- * The video region — Phase 3 edition (PLAN.md §12.1 rule 10, §14 Phase 3 task 10).
+ * The video region (PLAN.md §12.4, §8.7, §5.3).
  *
- * There is no player yet: synchronised playback is Phase 4 and the `video:*`
- * socket handlers currently answer `not_implemented`. So this renders a real
- * empty state and says so.
+ * It owns the rectangle, the player's lifetime, and everything drawn on top of
+ * the picture: the autoplay gate, the "this video refuses to be embedded" state,
+ * the rejected-control pill, and the empty state with the paste-a-link form.
  *
- * What it deliberately does NOT do is fake one. A black rectangle with a
- * play triangle drawn on it, or a "Paste a link" field that silently does
- * nothing, both cost the same amount of code as this and teach people that the
- * controls in this app are decorative.
+ * **Why the player is constructed here and not in the sync layer.** The iframe
+ * belongs to a DOM node, and a DOM node belongs to the component that renders
+ * it. So this component builds the `PlayerAdapter` for the room's current video
+ * and hands it *up* through `useAttachPlayer()`; the `SyncController` borrows it
+ * and never destroys it. The alternative — a headless controller reaching into
+ * the document for a container — is how you get a player that survives a route
+ * change with its audio still playing.
+ *
+ * **It is built once, not once per video.** When the room switches videos the
+ * controller calls `player.load()` on the existing player (§8.4 `set_video`).
+ * Tearing the iframe down and building a new one would drop the buffer, the
+ * quality ladder and roughly two seconds on every change, and would race the
+ * controller's own reload. Hence the `epoch` indirection below: the create
+ * effect's cleanup must run on unmount, and never merely because the anchor
+ * moved.
+ *
+ * The stage is black and 16:9. Where the region is taller than 16:9 the box
+ * stays wider than the video and YouTube letterboxes inside it — black on black,
+ * so there is no grey gutter anywhere.
  */
-import type { ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { Lock, Youtube } from 'lucide-react';
-import { formatTimestamp } from '@syncstudy/shared';
+import type { ControlRejectReason, PlayerAdapter, PlayerErrorInfo } from '@syncstudy/shared';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { useJoinError, useVideoAnchor } from '@/lib/stores/room-store';
+import { AutoplayGate } from '@/components/room/AutoplayGate';
+import { SetVideoForm } from '@/components/room/SetVideoForm';
+import { useJoinError, useRoomStore, useVideoAnchor } from '@/lib/stores/room-store';
+import { useServerClock } from '@/lib/sync/clock';
+import { joinStartPositionSec } from '@/lib/sync/controller';
+import { createPlayer, PlayerLoadError, UnsupportedProviderError } from '@/lib/sync/players';
+import { useAttachPlayer, useSyncController, useSyncStatus } from '@/lib/sync/useSyncController';
 import { cn } from '@/lib/utils';
+
+/** The element the iframe is mounted into. Named so E2E can find the stage. */
+export const PLAYER_MOUNT_ID = 'syncstudy-player';
+
+/** How long the §8.5d rejected-control pill stays up. Long enough to read once. */
+const REJECTION_PILL_MS = 2_000;
+
+/** Everything that can go wrong before the player is usable, as one shape. */
+function toErrorInfo(failure: unknown): PlayerErrorInfo {
+  if (failure instanceof PlayerLoadError) return failure.info;
+  if (failure instanceof UnsupportedProviderError) {
+    return { code: 0, embedDenied: false, message: failure.message };
+  }
+  const message =
+    failure instanceof Error && failure.message.length > 0 && failure.message.length < 200
+      ? failure.message
+      : "YouTube's player didn't load. Check your connection and try again.";
+  return { code: 0, embedDenied: false, message };
+}
 
 export function VideoStage({
   canSetVideo,
+  loading = false,
   className,
 }: {
   canSetVideo: boolean;
+  /** The snapshot has not landed. Show the shape of the stage, not an empty state. */
+  loading?: boolean | undefined;
   className?: string | undefined;
 }) {
   const video = useVideoAnchor();
   const joinError = useJoinError();
+  const status = useSyncStatus();
+  const controller = useSyncController();
+  const attach = useAttachPlayer();
+  const clock = useServerClock();
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const playerRef = useRef<PlayerAdapter | null>(null);
+  /** Latest anchor, for the create effect — which must not re-run when it moves. */
+  const anchorRef = useRef(video);
+  anchorRef.current = video;
+
+  const [loadError, setLoadError] = useState<PlayerErrorInfo | null>(null);
+  const [epoch, setEpoch] = useState(0);
+  /** Bumped by the retry button so a transient load failure is not terminal. */
+  const [retryNonce, setRetryNonce] = useState(0);
+
+  // A video appeared where there was none — the room's first, or a different one
+  // after a failed load. An existing player is left alone: the controller
+  // reloads it, which is cheaper and cannot race with this.
+  //
+  // Keyed on revision as well as videoRef so a re-issued `set_video` for the SAME
+  // video rebuilds. Player construction fails for transient reasons (the IFrame
+  // API script blocked, slow, or timing out on ready), and without this the
+  // failure was terminal for that client: `playerRef.current` stays null, no
+  // adapter is ever attached, no controller runs, and nothing short of a page
+  // reload recovers. `PlayerFailure` also offers a retry (see `retryNonce`).
+  useEffect(() => {
+    if (video.videoRef === null || playerRef.current !== null) return;
+    setLoadError(null);
+    setEpoch((current) => current + 1);
+  }, [video.videoRef, video.revision, retryNonce]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    const anchor = anchorRef.current;
+    if (container === null || clock === null) return;
+    if (anchor.provider === 'none' || anchor.videoRef === null) return;
+    if (playerRef.current !== null) return;
+
+    let disposed = false;
+    let created: PlayerAdapter | null = null;
+    const videoRef = anchor.videoRef;
+
+    void createPlayer({
+      provider: anchor.provider,
+      container,
+      videoRef,
+      // §8.7 step 4: aim slightly ahead of the room when it is playing, because
+      // loading and buffering take real time. Shared with the controller's own
+      // reload path so the two cannot disagree about where "now" is.
+      startAtSec: joinStartPositionSec(anchor, clock.now()),
+    }).then(
+      (player) => {
+        // StrictMode mounts, unmounts and remounts every effect in development,
+        // so a player that lands after the cleanup must destroy itself rather
+        // than become an invisible second iframe playing audio.
+        if (disposed) {
+          player.destroy();
+          return;
+        }
+        created = player;
+        playerRef.current = player;
+        attach(player, videoRef);
+      },
+      (failure: unknown) => {
+        if (disposed) return;
+        setLoadError(toErrorInfo(failure));
+      },
+    );
+
+    return () => {
+      disposed = true;
+      if (created === null) return;
+      attach(null);
+      playerRef.current = null;
+      created.destroy();
+    };
+  }, [epoch, clock, attach]);
+
+  const hasVideo = video.provider !== 'none' && video.videoRef !== null;
+  // The controller reports errors the player raises once it is running; this
+  // component reports the ones that stop it existing at all.
+  const playerError = loadError ?? status.error;
+  const showPlayer = joinError === null && hasVideo && playerError === null;
 
   return (
     <section
       aria-label="Video"
       className={cn(
-        // Scrolls rather than clips: on a phone the 16:9 box is ~210px tall and
-        // the host's empty state is a little taller than that.
-        'ss-scroll flex min-h-0 items-center justify-center overflow-y-auto bg-surface-1 p-4 sm:p-6',
+        'relative flex min-h-0 items-center justify-center overflow-hidden',
+        showPlayer ? 'bg-black' : 'bg-surface-1',
         className,
       )}
     >
-      {joinError !== null ? (
-        <JoinFailure code={joinError.code} message={joinError.message} />
-      ) : video.videoRef !== null ? (
-        <VideoQueued
-          title={video.title}
-          videoRef={video.videoRef}
-          durationSec={video.durationSec}
+      {/* Rendered unconditionally so the iframe is never re-parented; only its
+          visibility changes. */}
+      <div
+        className={cn(
+          'relative aspect-video max-h-full w-full',
+          '[&_iframe]:block [&_iframe]:h-full [&_iframe]:w-full [&_iframe]:border-0',
+          showPlayer ? 'block' : 'hidden',
+        )}
+      >
+        <div id={PLAYER_MOUNT_ID} ref={containerRef} className="absolute inset-0" />
+
+        <AutoplayGate
+          needsGesture={showPlayer && status.needsGesture}
+          mutedForAutoplay={status.mutedForAutoplay}
+          onAccept={async () => {
+            await controller?.acceptGesture();
+          }}
         />
-      ) : (
-        <NoVideo canSetVideo={canSetVideo} />
+
+        <ControlRejectionPill />
+      </div>
+
+      {showPlayer ? null : (
+        <div className="ss-scroll absolute inset-0 flex overflow-y-auto p-4 sm:p-6">
+          <div className="m-auto w-full max-w-md">
+            {joinError !== null ? (
+              <JoinFailure code={joinError.code} message={joinError.message} />
+            ) : playerError !== null ? (
+              <PlayerFailure
+                error={playerError}
+                canSetVideo={canSetVideo}
+                onRetry={() => {
+                  setLoadError(null);
+                  setRetryNonce((n) => n + 1);
+                }}
+              />
+            ) : loading ? (
+              <StageSkeleton />
+            ) : (
+              <NoVideo canSetVideo={canSetVideo} />
+            )}
+          </div>
+        </div>
       )}
     </section>
   );
@@ -69,9 +227,18 @@ function EmptyMark({ children }: { children: ReactNode }) {
   );
 }
 
+/** Grey blocks at the real geometry, never a centred spinner (§12.1 rule 11). */
+function StageSkeleton() {
+  return (
+    <div aria-hidden="true" className="w-full">
+      <div className="aspect-video w-full rounded-md bg-surface-2" />
+    </div>
+  );
+}
+
 function NoVideo({ canSetVideo }: { canSetVideo: boolean }) {
   return (
-    <div className="flex w-full max-w-md flex-col items-center gap-4 text-center">
+    <div className="flex w-full flex-col items-center gap-4 text-center">
       <EmptyMark>
         <Youtube size={16} strokeWidth={1.5} aria-hidden="true" />
       </EmptyMark>
@@ -80,71 +247,155 @@ function NoVideo({ canSetVideo }: { canSetVideo: boolean }) {
         <h2 className="text-base font-medium text-primary">No video yet</h2>
         <p className="text-13 text-secondary">
           {canSetVideo
-            ? 'Paste a YouTube link and everyone in the room loads it at the same position.'
+            ? 'Paste a YouTube link. Everyone in the room loads it at the same position.'
             : 'The host will paste a YouTube link. Everyone loads it at the same position.'}
         </p>
       </div>
 
-      {canSetVideo ? (
-        <form
-          className="flex w-full flex-col gap-2"
-          onSubmit={(event) => event.preventDefault()}
-          aria-describedby="video-phase-note"
-        >
-          <div className="flex items-start gap-2">
-            <label htmlFor="video-url" className="sr-only">
-              YouTube link
-            </label>
-            <Input
-              id="video-url"
-              disabled
-              placeholder="https://www.youtube.com/watch?v=…"
-              className="flex-1"
-            />
-            <Button type="submit" variant="primary" disabled>
-              Load video
-            </Button>
-          </div>
-          <p id="video-phase-note" className="text-13 text-tertiary">
-            Not wired up yet — synchronised playback arrives in Phase 4.
-          </p>
-        </form>
-      ) : null}
+      {canSetVideo ? <SetVideoForm id="video-url-empty" /> : null}
     </div>
   );
 }
 
 /**
- * Phase 4 will replace this with the player. Until then, a video that somehow
- * exists on the anchor is reported honestly rather than rendered as a frame.
+ * The player refused the video (§5.3 quirk 5).
+ *
+ * 101 and 150 are the same thing wearing two numbers: the owner disabled
+ * embedding. It is the most common way a pasted link fails, and the copy says
+ * what to do about it rather than printing a code at somebody.
  */
-function VideoQueued({
-  title,
-  videoRef,
-  durationSec,
+function describePlayerError(error: PlayerErrorInfo): { title: string; body: string } {
+  if (error.embedDenied) {
+    return {
+      title: "This video can't be played outside YouTube",
+      body: 'Its owner turned off embedding. Try another link.',
+    };
+  }
+  switch (error.code) {
+    case 100:
+      return {
+        title: 'That video is gone',
+        body: 'It is private or has been deleted. Try another link.',
+      };
+    case 2:
+      return { title: 'That link is not a video', body: 'Check the address and paste it again.' };
+    case 5:
+      return {
+        title: "This browser couldn't play that video",
+        body: 'Reload the page, or try another link.',
+      };
+    case 0:
+      // Not YouTube refusing the video — the player never got off the ground.
+      // The adapter's own sentence is the useful one here.
+      return { title: "The player didn't load", body: error.message };
+    default:
+      return { title: 'That video will not play', body: 'Try another link.' };
+  }
+}
+
+function PlayerFailure({
+  error,
+  canSetVideo,
+  onRetry,
 }: {
-  title: string | null;
-  videoRef: string;
-  durationSec: number | null;
+  error: PlayerErrorInfo;
+  canSetVideo: boolean;
+  onRetry: () => void;
 }) {
+  const described = describePlayerError(error);
+
   return (
-    <div className="flex w-full max-w-md flex-col items-center gap-4 text-center">
+    <div className="flex w-full flex-col items-center gap-4 text-center">
       <EmptyMark>
         <Youtube size={16} strokeWidth={1.5} aria-hidden="true" />
       </EmptyMark>
 
       <div className="flex flex-col gap-1">
-        <h2 className="text-base font-medium text-primary">{title ?? 'A video is set'}</h2>
-        <p className="text-13 text-secondary">
-          <span className="font-mono">{videoRef}</span>
-          {durationSec !== null ? ` · ${formatTimestamp(durationSec)}` : null}
-        </p>
-        <p className="text-13 text-tertiary">
-          The player and the sync loop arrive in Phase 4. Nothing plays yet.
-        </p>
+        <h2 className="text-base font-medium text-primary">{described.title}</h2>
+        <p className="text-13 text-secondary">{described.body}</p>
       </div>
+
+      {/*
+        A denied embed will never load however many times you ask, but every other
+        failure here is transient — the IFrame API script blocked, slow, or timing
+        out on ready — and without a way back the client is stuck on this screen
+        until it reloads the page, while the rest of the room watches on.
+      */}
+      {error.embedDenied ? null : (
+        <Button variant="secondary" size="sm" onClick={onRetry}>
+          Try again
+        </Button>
+      )}
+
+      {canSetVideo ? (
+        <SetVideoForm id="video-url-error" />
+      ) : (
+        <p className="text-13 text-tertiary">Ask the host to try a different video.</p>
+      )}
     </div>
   );
+}
+
+/**
+ * A rejected control (§8.5d).
+ *
+ * Two seconds, one line, over the corner of the video. Not a red error and not a
+ * modal: losing a race with somebody else's seek is a normal thing that happens
+ * in a shared room, and the user's own change has already reverted to the
+ * authoritative anchor by the time this appears.
+ *
+ * Its own component because it is the only thing in the stage that needs the
+ * participant list, and the selector returns a plain string — so a `speaking`
+ * patch arriving four times a second cannot re-render the video region (§5.4).
+ */
+function ControlRejectionPill() {
+  const rejection = useRoomStore((state) => state.controlRejection);
+  const actorName = useRoomStore((state) => {
+    const actorId = state.video.lastActorId;
+    if (actorId === null) return null;
+    return state.participants.find((participant) => participant.id === actorId)?.displayName ?? null;
+  });
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (rejection === null) return;
+    setVisible(true);
+    const timer = setTimeout(() => setVisible(false), REJECTION_PILL_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [rejection]);
+
+  if (rejection === null || !visible) return null;
+
+  return (
+    <p
+      role="status"
+      className={cn(
+        'absolute left-3 top-3 z-10 animate-fade-in rounded-md border border-border',
+        'bg-bg/95 px-2 py-1 text-13 text-primary',
+      )}
+    >
+      {rejectionText(rejection.reason, actorName)}
+    </p>
+  );
+}
+
+function rejectionText(reason: ControlRejectReason, actorName: string | null): string {
+  switch (reason) {
+    case 'recently_changed':
+      return actorName === null
+        ? 'Someone just changed the video'
+        : `${actorName} just changed the video`;
+    case 'stale_revision':
+      return 'The room moved on — you are back in step';
+    case 'not_permitted':
+      return 'You cannot control playback in this room';
+    case 'rate_limited':
+      return 'Too many changes just now — try again in a moment';
+    case 'no_video':
+      return 'There is no video to control yet';
+  }
 }
 
 interface Failure {
@@ -162,7 +413,7 @@ function JoinFailure({ code, message }: { code: string; message: string }) {
   const failure = describe(code, message);
 
   return (
-    <div className="flex w-full max-w-md flex-col items-center gap-4 text-center">
+    <div className="flex w-full flex-col items-center gap-4 text-center">
       <EmptyMark>
         <Lock size={16} strokeWidth={1.5} aria-hidden="true" />
       </EmptyMark>

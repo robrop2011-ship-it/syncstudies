@@ -23,9 +23,12 @@ import {
   CLOCK_SAMPLES_JOIN,
   CLOCK_SAMPLES_RESYNC,
   CLOCK_SAMPLE_SPACING_MS,
+  ROOM_HEARTBEAT_MS,
 } from '@syncstudy/shared';
 import { createSocket, realtimeUrl, type TypedClientSocket } from '@/lib/socket/client';
 import { ServerClock, ServerClockContext } from '@/lib/sync/clock';
+import { createSyncBridge, type AnchorReason, type SyncBridge } from '@/lib/sync/controller';
+import { SyncProvider } from '@/lib/sync/provider';
 import {
   createRoomStore,
   RoomStoreContext,
@@ -70,6 +73,21 @@ export function useSocket(): TypedClientSocket | null {
   return useContext(SocketContext);
 }
 
+/**
+ * `video:state` carries the server's reason for the change; the drift loop's
+ * vocabulary is slightly narrower (§8.6 also has 'snapshot', which only ever
+ * comes from a join). `auto_buffer` is a real, authoritative status change that
+ * the wait-for-slow logic made on everyone's behalf, so it is applied with the
+ * same urgency as a human pressing pause.
+ */
+const ANCHOR_REASON: Record<string, AnchorReason> = {
+  control: 'control',
+  heartbeat: 'heartbeat',
+  auto_buffer: 'control',
+  resync: 'resync',
+  set_video: 'set_video',
+};
+
 export interface RoomSocketProviderProps {
   roomCode: string;
   children: React.ReactNode;
@@ -87,6 +105,14 @@ export function RoomSocketProvider({
   const storeRef = useRef<RoomStoreApi | null>(null);
   storeRef.current ??= createRoomStore();
   const store = storeRef.current;
+
+  // The slot the socket handlers below push authoritative anchors into. It has to
+  // exist before the effect runs and outlive every reconnect, because the
+  // controller on the other end of it is created by a DESCENDANT — the moment a
+  // player is attached — which is long after the first `video:state` can arrive.
+  const bridgeRef = useRef<SyncBridge | null>(null);
+  bridgeRef.current ??= createSyncBridge();
+  const bridge = bridgeRef.current;
 
   // Both are null until the effect runs; the contract types say so, and the
   // consumers below all handle it — a socket that exists before the effect is
@@ -150,6 +176,20 @@ export function RoomSocketProvider({
       state().setServerTimeOffset(activeClock.now() - Date.now());
     };
 
+    /**
+     * One place that applies a snapshot, because there are two sources of them
+     * (the join ack and a server push) and the ORDER matters: the store first,
+     * then the controller — the controller reads the anchor back out of the
+     * store on every tick, so telling it about an anchor the store has not
+     * accepted yet would have it converge on the previous one.
+     */
+    const applySnapshot = (snapshot: Parameters<RoomStoreState['applySnapshot']>[0]): void => {
+      state().applySnapshot(snapshot);
+      // §8.7 / §8.8: a snapshot is a join, a late join, or a reconnect. All three
+      // want the player put where the anchor says without measuring first.
+      bridge.controller?.applyAnchor(snapshot.video, 'snapshot');
+    };
+
     const join = (): void => {
       joinAttempts += 1;
       activeSocket.emit('room:join', { roomCode }, (ack) => {
@@ -160,7 +200,7 @@ export function RoomSocketProvider({
           joinAttempts = 0;
           // §8.7 step 2: the snapshot rides on the ack, so there is one payload
           // and one place that applies it.
-          state().applySnapshot(ack.snapshot);
+          applySnapshot(ack.snapshot);
           return;
         }
 
@@ -179,17 +219,41 @@ export function RoomSocketProvider({
       });
     };
 
-    // NOTE: there is no client for `room:resync` right now, and that is
-    // deliberate. It refreshes a socket that is STILL in the room — the
-    // backgrounded-tab case in §8.9 — which only becomes actionable once there
-    // is a player whose drift can be re-evaluated. Phase 4 wires it up. After a
-    // transport drop it is useless: the server socket is new, so it always
-    // answers `not_in_room` (see the note in onConnect).
-
+    /**
+     * §8.9, the backgrounded-tab case. `room:resync` refreshes a socket that is
+     * STILL in the room, which is the one situation where we may have missed a
+     * broadcast without ever seeing a disconnect: a suspended mobile tab can
+     * have its buffered frames dropped underneath a connection that never
+     * reported closing.
+     *
+     * Gated on how long we were away — a tab you flicked away from for two
+     * seconds missed nothing, and the server rate-limits this event. Elapsed
+     * time is measured with `performance.now()` because the whole point of the
+     * check is that the machine may have slept and `Date.now()` may have
+     * stepped. After a transport DROP this is useless: socket.io reconnects with
+     * a brand new server-side socket, so `socket.data.roomId` is unset and the
+     * server correctly answers `not_in_room`. That path joins instead.
+     */
+    let hiddenSinceMono: number | null = null;
+    const onVisibility = (): void => {
+      if (disposed || terminal) return;
+      if (document.visibilityState !== 'visible') {
+        hiddenSinceMono = performance.now();
+        return;
+      }
+      const away = hiddenSinceMono === null ? 0 : performance.now() - hiddenSinceMono;
+      hiddenSinceMono = null;
+      if (!joinedOnce || !activeSocket.connected || away < ROOM_HEARTBEAT_MS) return;
+      activeSocket.emit('room:resync', { lastRevision: state().video.revision }, (ack) => {
+        if (disposed || terminal) return;
+        if (ack.ok && ack.snapshot !== undefined) applySnapshot(ack.snapshot);
+      });
+    };
 
     const onConnect = (): void => {
       if (disposed || terminal) return;
       state().setConnection('connected', 0);
+      bridge.controller?.setTransportConnected(true);
 
       // `resuming` only selects the CLOCK sample count. It deliberately does not
       // select resync-vs-join any more: socket.io reconnection creates a brand
@@ -223,6 +287,9 @@ export function RoomSocketProvider({
 
     const onDisconnect = (reason: string): void => {
       if (disposed) return;
+      // §8.8: pause the drift loop. There is nothing authoritative to compare
+      // against, so corrections would be guesses — but playback keeps running.
+      bridge.controller?.setTransportConnected(false);
       if (terminal) {
         state().setConnection('failed', 0);
         return;
@@ -301,6 +368,7 @@ export function RoomSocketProvider({
     activeSocket.on('connect_error', onConnectError);
     manager.on('reconnect_attempt', onReconnectAttempt);
     manager.on('reconnect_failed', onReconnectFailed);
+    document.addEventListener('visibilitychange', onVisibility);
 
     // ── room ────────────────────────────────────────────────────────────────
     // Server-initiated refresh. The server pushes one of these when a role change
@@ -308,7 +376,7 @@ export function RoomSocketProvider({
     // re-derive permissions from a role string (§11.2 — one resolver, server-side).
     activeSocket.on('room:snapshot', (snapshot) => {
       if (disposed || terminal) return;
-      state().applySnapshot(snapshot);
+      applySnapshot(snapshot);
     });
     activeSocket.on('room:updated', ({ patch }) => {
       if (disposed) return;
@@ -349,10 +417,14 @@ export function RoomSocketProvider({
       state().participantPatched(userId, patch);
     });
 
-    // ── video (Phase 4 builds the player on top; Phase 3 only keeps the anchor) ──
-    activeSocket.on('video:state', ({ anchor }) => {
+    // ── video (§8.6) ─────────────────────────────────────────────────────────
+    // Store first, controller second, in one handler. Two independent listeners
+    // would leave that order up to registration order, and the controller reads
+    // the anchor back out of the store.
+    activeSocket.on('video:state', ({ anchor, reason }) => {
       if (disposed) return;
       state().setVideo(anchor);
+      bridge.controller?.applyAnchor(anchor, ANCHOR_REASON[reason] ?? 'control');
     });
     activeSocket.on('video:control_rejected', ({ reason, anchor }) => {
       if (disposed) return;
@@ -360,6 +432,7 @@ export function RoomSocketProvider({
       // rejected client can reconcile immediately instead of asking (§8.5).
       state().setVideo(anchor);
       state().noteControlRejected(reason);
+      bridge.controller?.applyAnchor(anchor, 'control');
     });
 
     // ── system ──────────────────────────────────────────────────────────────
@@ -380,6 +453,7 @@ export function RoomSocketProvider({
       disposed = true;
       clearRetry();
       activeClock.stopSchedule();
+      document.removeEventListener('visibilitychange', onVisibility);
       manager.off('reconnect_attempt', onReconnectAttempt);
       manager.off('reconnect_failed', onReconnectFailed);
       // Listeners first, then disconnect: the teardown must not fire our own
@@ -389,12 +463,21 @@ export function RoomSocketProvider({
       setSocket(null);
       setClock(null);
     };
-  }, [roomCode, router, store]);
+  }, [roomCode, router, store, bridge]);
 
   return (
     <RoomStoreContext.Provider value={store}>
       <ServerClockContext.Provider value={clock}>
-        <SocketContext.Provider value={socket}>{children}</SocketContext.Provider>
+        <SocketContext.Provider value={socket}>
+          {/* Inside the socket, clock and store, and mounted for exactly as long
+              as the room is: the drift loop starts when a player is attached and
+              is torn down with this provider. Passed as props rather than read
+              from the contexts above, because this module imports SyncProvider —
+              reading `useSocket()` from there would be an import cycle. */}
+          <SyncProvider socket={socket} clock={clock} store={store} bridge={bridge}>
+            {children}
+          </SyncProvider>
+        </SocketContext.Provider>
       </ServerClockContext.Provider>
     </RoomStoreContext.Provider>
   );
