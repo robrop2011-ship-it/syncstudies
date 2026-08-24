@@ -1,0 +1,122 @@
+# SyncStudy CI (PLAN.md §14 Phase 1.8, §15.1)
+#
+# One job, run in the same order a developer would run things locally, so a red
+# build is reproducible with a single command from the README. Every step is a
+# hard gate: GitHub fails the job on the first non-zero exit, and nothing here uses
+# `continue-on-error`.
+#
+# Postgres and Redis are started as service containers even though today's suites
+# are pure unit tests. The integration layer (§15.1 — real Postgres + Redis, socket
+# handlers end to end) lands in Phase 3, and having the services already wired means
+# that change is a new test file rather than a CI archaeology session.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same branch makes the in-flight run irrelevant; cancel it
+# rather than queueing behind it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: typecheck · lint · test · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: syncstudy
+          POSTGRES_PASSWORD: syncstudy
+          POSTGRES_DB: syncstudy
+        ports:
+          - 5432:5432
+        # Without the health check the first Prisma command races initdb and fails
+        # with "the database system is starting up".
+        options: >-
+          --health-cmd "pg_isready -U syncstudy -d syncstudy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      CI: 'true'
+      # These mirror .env.example. They are CI-only throwaways — the only secret-
+      # shaped values are salts, and a public salt for a database that is destroyed
+      # at the end of the job is not a secret.
+      DATABASE_URL: postgresql://syncstudy:syncstudy@localhost:5432/syncstudy?schema=public
+      REDIS_URL: redis://localhost:6379
+      IP_HASH_SALT: ci-ip-hash-salt-0123456789
+      TURN_SECRET: ci-turn-secret
+      TURN_URLS: stun:localhost:3478,turn:localhost:3478?transport=udp
+      ALLOWED_ORIGINS: http://localhost:3000
+      NEXT_PUBLIC_REALTIME_URL: http://localhost:4000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NODE_ID: ci-1
+      LOG_LEVEL: warn
+      # Next telemetry is a network call on a machine that should make none.
+      NEXT_TELEMETRY_DISABLED: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Must come before setup-node: `cache: pnpm` needs the pnpm binary on PATH to
+      # locate the store. The version is read from `packageManager` in package.json,
+      # so CI and developer machines cannot drift.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --frozen-lockfile makes CI fail on an out-of-date pnpm-lock.yaml instead of
+      # silently resolving different versions than the developer tested against.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Workspace packages are consumed as TypeScript source, so there is no build
+      # step between them — but the Prisma client is generated code, and @syncstudy/db
+      # does not typecheck until it exists.
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
+      # Pushes the schema into the service container. This is what the integration
+      # suites will run against, and it doubles as a check that the schema actually
+      # applies to a real Postgres rather than merely parsing.
+      - name: Apply schema to the CI database
+        run: pnpm db:push
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

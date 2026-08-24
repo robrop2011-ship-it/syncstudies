@@ -1,0 +1,462 @@
+@import 'tailwindcss';
+
+/* Explicit sources rather than relying on auto-detection walking the monorepo:
+   deterministic, and it keeps the scan off packages/ and the realtime app. */
+@source '../app/**/*.{ts,tsx}';
+@source '../components/**/*.{ts,tsx}';
+@source '../lib/**/*.{ts,tsx}';
+
+/* ==========================================================================
+   Design tokens — PLAN.md §12.3
+   These values are fixed. Do not add colours here; if a colour is not carrying
+   meaning (action / destructive / degraded / connected), it does not belong.
+
+   Theming has three states and all three must work:
+     1. bare :root                       → the complete LIGHT palette
+     2. prefers-color-scheme: dark       → dark, unless the user forced light
+     3. :root[data-theme='dark']         → dark, whatever the OS says
+   Every colour is defined in state 1, so nothing is ever only-defined inside a
+   media query or an attribute block.
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* Neutrals — warm-tinted greys, not pure grey; reads less clinical. */
+  --bg: #ffffff;
+  --surface-1: #fafaf9;
+  --surface-2: #f5f5f4;
+  --surface-3: #e7e5e4;
+  --border: #e7e5e4;
+  --border-strong: #d6d3d1;
+  --text-primary: #1c1917;
+  --text-secondary: #57534e;
+  --text-tertiary: #a8a29e;
+
+  /* One accent. Primary action, active tab, focus ring. Nothing else. */
+  --accent: #4f46a8;
+  --accent-hover: #453d95;
+  --accent-subtle: #eeecfa;
+  --accent-text: #ffffff;
+
+  /* Semantic */
+  --danger: #b42318;
+  --danger-subtle: #fef3f2;
+  --warning: #b54708;
+  --warning-subtle: #fffaeb;
+  --success: #067647;
+  --success-subtle: #ecfdf3;
+  --live: #d92d20;
+
+  /* Elevation — only for genuinely floating layers. */
+  --shadow-dropdown:
+    0 4px 12px rgba(28, 25, 23, 0.08), 0 1px 2px rgba(28, 25, 23, 0.06);
+  --shadow-dialog:
+    0 16px 40px rgba(28, 25, 23, 0.14), 0 2px 6px rgba(28, 25, 23, 0.06);
+
+  /* Derived, not a new hue: the dialog scrim is the primary text colour at low alpha. */
+  --scrim: rgba(28, 25, 23, 0.4);
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 8px;
+  --radius-dialog: 10px;
+
+  --font-sans:
+    var(--font-inter), 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --dur-fast: 120ms;
+  --dur: 160ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* The only distance anything ever travels. Reduced motion sets it to 0 and every
+     "pop" in the app degrades to a plain fade without a single duplicated keyframe. */
+  --motion-shift: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --bg: #131211;
+    --surface-1: #1a1918;
+    --surface-2: #232120;
+    --surface-3: #2d2a28;
+    --border: #2d2a28;
+    --border-strong: #3d3936;
+    --text-primary: #f5f5f4;
+    --text-secondary: #a8a29e;
+    --text-tertiary: #78716c;
+
+    --accent: #8b83e6;
+    --accent-hover: #9d96ea;
+    --accent-subtle: #241f3d;
+    --accent-text: #131211;
+
+    --danger: #f97066;
+    --danger-subtle: #2d1614;
+    --warning: #f79009;
+    --warning-subtle: #2a1c08;
+    --success: #47cd89;
+    --success-subtle: #0d2419;
+
+    --shadow-dropdown: 0 4px 12px rgba(0, 0, 0, 0.4);
+    --shadow-dialog: 0 16px 40px rgba(0, 0, 0, 0.55);
+    --scrim: rgba(0, 0, 0, 0.6);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #131211;
+  --surface-1: #1a1918;
+  --surface-2: #232120;
+  --surface-3: #2d2a28;
+  --border: #2d2a28;
+  --border-strong: #3d3936;
+  --text-primary: #f5f5f4;
+  --text-secondary: #a8a29e;
+  --text-tertiary: #78716c;
+
+  --accent: #8b83e6;
+  --accent-hover: #9d96ea;
+  --accent-subtle: #241f3d;
+  --accent-text: #131211;
+
+  --danger: #f97066;
+  --danger-subtle: #2d1614;
+  --warning: #f79009;
+  --warning-subtle: #2a1c08;
+  --success: #47cd89;
+  --success-subtle: #0d2419;
+
+  --shadow-dropdown: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-dialog: 0 16px 40px rgba(0, 0, 0, 0.55);
+  --scrim: rgba(0, 0, 0, 0.6);
+}
+
+/* ==========================================================================
+   Tailwind v4 theme mapping.
+
+   `inline` matters: it makes utilities reference the token directly
+   (`background-color: var(--surface-1)`) instead of going through a second
+   generated variable, so a theme swap on :root is picked up with no extra hop.
+
+   Keys are chosen to avoid colliding with Tailwind's own defaults, except where
+   a collision is desirable: `--radius-sm` (4px) and `--radius-lg` (8px) above
+   intentionally shadow Tailwind's, so `rounded-sm` / `rounded-lg` already carry
+   the design system's values.
+
+   Tailwind's stock palette (bg-blue-500 and friends) is still reachable and is
+   still off-limits: PLAN.md §12.1 rule 3 says a colour that is not carrying
+   meaning does not belong on screen. Use the tokens below or nothing.
+   ========================================================================== */
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-primary: var(--text-primary);
+  --color-secondary: var(--text-secondary);
+  --color-tertiary: var(--text-tertiary);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-accent-text: var(--accent-text);
+
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-live: var(--live);
+
+  --color-scrim: var(--scrim);
+
+  /* rounded-md = 6px, rounded-modal = 10px. sm/lg come from :root above. */
+  --radius-md: var(--radius);
+  --radius-modal: var(--radius-dialog);
+
+  /* shadow-menu / shadow-modal — the only two elevations that exist. */
+  --shadow-menu: var(--shadow-dropdown);
+  --shadow-modal: var(--shadow-dialog);
+
+  /* Type scale: 12 / 13 / 14 / 16 / 20 / 28. 13 and 28 need explicit keys;
+     the rest are Tailwind's xs / sm / base / xl. */
+  --text-13: 0.8125rem;
+  --text-13--line-height: 1.25rem;
+  --text-28: 1.75rem;
+  --text-28--line-height: 2.125rem;
+
+  --ease-standard: var(--ease);
+
+  /* The entire motion vocabulary, exposed as utilities so Radix state variants
+     (`data-[state=open]:animate-pop-in`) can reach them. */
+  --animate-fade-in: ss-fade-in var(--dur) var(--ease);
+  --animate-fade-out: ss-fade-out var(--dur-fast) var(--ease);
+  --animate-pop-in: ss-pop-in var(--dur) var(--ease);
+  --animate-pop-out: ss-pop-out var(--dur-fast) var(--ease);
+}
+
+/* ========================================================================== */
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background-color: var(--accent-subtle);
+    color: var(--text-primary);
+  }
+
+  /* One ring, one colour, keyboard only. Applied here so nothing can forget it.
+     No border-radius override — the outline already follows the element's own. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  ::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  /* Headings inherit weight from the utility that sets them; no 700+ anywhere. */
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 600;
+    letter-spacing: -0.011em;
+  }
+}
+
+/* ==========================================================================
+   Motion. 120–160ms, cubic-bezier(0.2,0,0,1), opacity and transform only.
+   These four keyframes are the entire motion vocabulary of the app.
+   ========================================================================== */
+
+@keyframes ss-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ss-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes ss-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-shift));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ss-pop-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(calc(var(--motion-shift) / 2));
+  }
+}
+
+@keyframes ss-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* The one permitted pulse: a genuine live indicator, 2s cycle (PLAN.md §12.1). */
+@keyframes ss-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.ss-spin {
+  animation: ss-spin 0.7s linear infinite;
+}
+.ss-live-dot {
+  animation: ss-live 2s var(--ease) infinite;
+}
+
+/* --------------------------------------------------------------------------
+   Reduced motion. Two triggers: the OS preference, and the account setting
+   (`reduce_motion`), which stamps data-reduce-motion="true" on <html>.
+   `data-reduced-motion` is accepted as an alias so a mis-typed attribute in one
+   component cannot silently drop an accessibility setting on the floor.
+
+   Transitions collapse to opacity, and `--motion-shift: 0` turns every pop into
+   a plain fade at the keyframe level, so no component needs a second code path.
+   Loading indicators keep turning, slower — a frozen spinner reads as a hung page,
+   which is a worse outcome than the motion it was avoiding.
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-shift: 0px;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-property: opacity !important;
+    transition-duration: var(--dur-fast) !important;
+    animation-iteration-count: 1 !important;
+  }
+  .ss-spin {
+    animation: ss-spin 1.4s linear infinite !important;
+  }
+  .ss-live-dot {
+    animation: none !important;
+  }
+}
+
+:root[data-reduce-motion='true'],
+:root[data-reduced-motion='true'] {
+  --motion-shift: 0px;
+}
+:root[data-reduce-motion='true'] *,
+:root[data-reduce-motion='true'] *::before,
+:root[data-reduce-motion='true'] *::after,
+:root[data-reduced-motion='true'] *,
+:root[data-reduced-motion='true'] *::before,
+:root[data-reduced-motion='true'] *::after {
+  transition-property: opacity !important;
+  transition-duration: var(--dur-fast) !important;
+  animation-iteration-count: 1 !important;
+}
+:root[data-reduce-motion='true'] .ss-spin,
+:root[data-reduced-motion='true'] .ss-spin {
+  animation: ss-spin 1.4s linear infinite !important;
+}
+:root[data-reduce-motion='true'] .ss-live-dot,
+:root[data-reduced-motion='true'] .ss-live-dot {
+  animation: none !important;
+}
+
+/* ==========================================================================
+   Avatar tints — PLAN.md §12.1 principle 3 kept intact: these are the existing
+   tokens reused, not five new hues. Red is deliberately absent so an avatar can
+   never be mistaken for an error state.
+   ========================================================================== */
+
+.ss-avatar-0 {
+  background-color: var(--surface-2);
+  color: var(--text-secondary);
+}
+.ss-avatar-1 {
+  background-color: var(--surface-3);
+  color: var(--text-primary);
+}
+.ss-avatar-2 {
+  background-color: var(--accent-subtle);
+  color: var(--accent);
+}
+.ss-avatar-3 {
+  background-color: var(--success-subtle);
+  color: var(--success);
+}
+.ss-avatar-4 {
+  background-color: var(--warning-subtle);
+  color: var(--warning);
+}
+
+/* ==========================================================================
+   Toasts (sonner). Background events only, bottom-left, max 3, 4s — §12.5.
+   Restyled to the tokens; sonner's own palette variables are overridden rather
+   than fought with !important.
+   ========================================================================== */
+
+[data-sonner-toaster] {
+  --normal-bg: var(--bg);
+  --normal-border: var(--border);
+  --normal-text: var(--text-primary);
+  --success-bg: var(--bg);
+  --success-border: var(--border);
+  --success-text: var(--text-primary);
+  --error-bg: var(--bg);
+  --error-border: var(--border);
+  --error-text: var(--text-primary);
+  --border-radius: var(--radius-lg);
+  font-family: var(--font-sans);
+}
+
+[data-sonner-toaster] [data-sonner-toast] {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dropdown);
+  font-size: 0.8125rem;
+  transition-duration: var(--dur);
+  transition-timing-function: var(--ease);
+}
+
+[data-sonner-toaster] [data-sonner-toast] [data-description] {
+  color: var(--text-secondary);
+}
+
+/* ==========================================================================
+   Scrollbars. Thin and neutral so a long chat log doesn't shout.
+   ========================================================================== */
+
+.ss-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.ss-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.ss-scroll::-webkit-scrollbar-thumb {
+  background-color: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+.ss-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}

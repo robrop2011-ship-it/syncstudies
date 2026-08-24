@@ -1,0 +1,399 @@
+// SyncStudy database schema — PLAN.md §7.2
+//
+// Amendment A1: accounts are website-only. There is no email column, no OAuth
+// account table, and no verification-token table. Identity is `handle` +
+// `passwordHash`, with a one-time `recoveryHash` standing in for reset-by-email.
+//
+// Ids are UUIDv7, generated in app code (see @syncstudy/shared `uuidv7()`), so
+// they sort by creation time and give `messages` btree locality that v4 destroys.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── identity ───────────────────────────
+
+model User {
+  id           String    @id @db.Uuid
+  /// The username. Stored lowercase; @syncstudy/shared `Handle` normalises on the way in.
+  handle       String    @unique @db.VarChar(20)
+  displayName  String    @map("display_name") @db.VarChar(40)
+  passwordHash String    @map("password_hash")
+
+  /// argon2id hash of the one-time recovery code. Null once redeemed and not yet reissued.
+  recoveryHash     String?   @map("recovery_hash")
+  recoveryIssuedAt DateTime? @map("recovery_issued_at") @db.Timestamptz
+
+  avatarKey String? @map("avatar_key")
+  bio       String? @db.VarChar(140)
+  school    String? @db.VarChar(80)
+
+  isGuest        Boolean   @default(false) @map("is_guest")
+  guestExpiresAt DateTime? @map("guest_expires_at") @db.Timestamptz
+  /// Self-declared 13–17 at signup. Drives the non-negotiable safe defaults (§11.9).
+  isMinor        Boolean   @default(false) @map("is_minor")
+
+  status         String    @default("active") @db.VarChar(16)
+  suspendedUntil DateTime? @map("suspended_until") @db.Timestamptz
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  settings          UserSettings?
+  sessions          AuthSession[]
+  hostedRooms       Room[]             @relation("RoomHost")
+  participations    RoomParticipant[]
+  messages          Message[]          @relation("MessageAuthor")
+  deletedMessages   Message[]          @relation("MessageDeleter")
+  noteItems         NoteItem[]         @relation("NoteAuthor")
+  resolvedNoteItems NoteItem[]         @relation("NoteResolver")
+  noteReplies       NoteReply[]
+  notesUpdated      RoomNotes[]
+  checklistCreated  ChecklistItem[]    @relation("ChecklistCreator")
+  checklistDone     ChecklistItem[]    @relation("ChecklistCompleter")
+  studySessions     StudySession[]
+  reportsFiled      Report[]           @relation("Reporter")
+  bansReceived      RoomBan[]          @relation("BannedUser")
+  bansIssued        RoomBan[]          @relation("BanIssuer")
+  roomEvents        RoomEvent[]
+  videosAdded       RoomVideoHistory[]
+  videoStatesActed  RoomVideoState[]
+
+  @@index([guestExpiresAt], map: "users_guest_expiry_idx")
+  @@map("users")
+}
+
+model UserSettings {
+  userId String @id @map("user_id") @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  profileVisibility  String  @default("rooms_only") @map("profile_visibility") @db.VarChar(16)
+  showOnlineStatus   Boolean @default(true) @map("show_online_status")
+  defaultRoomPrivacy String  @default("private") @map("default_room_privacy") @db.VarChar(16)
+  theme              String  @default("system") @db.VarChar(8)
+
+  defaultMicId     String? @map("default_mic_id")
+  defaultCameraId  String? @map("default_camera_id")
+  defaultSpeakerId String? @map("default_speaker_id")
+
+  /// Safe defaults: you arrive muted, camera off. Never flip these to false.
+  joinMuted     Boolean @default(true) @map("join_muted")
+  joinCameraOff Boolean @default(true) @map("join_camera_off")
+  pushToTalk    Boolean @default(false) @map("push_to_talk")
+  reduceMotion  Boolean @default(false) @map("reduce_motion")
+  /// Forces iceTransportPolicy:'relay' so peers never learn this user's IP (§11.5).
+  /// Forced on for minors.
+  hideIpFromPeers Boolean @default(false) @map("hide_ip_from_peers")
+
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("user_settings")
+}
+
+model AuthSession {
+  /// sha256 of the opaque token. The raw token only ever exists in the cookie.
+  id        String   @id
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  lastSeenAt DateTime @default(now()) @map("last_seen_at") @db.Timestamptz
+  /// sha256(ip + salt). Abuse prevention only, 30-day retention (§11.9).
+  ipHash    String?  @map("ip_hash")
+  userAgent String?  @map("user_agent")
+
+  @@index([userId], map: "auth_sessions_user_idx")
+  @@index([expiresAt], map: "auth_sessions_expiry_idx")
+  @@map("auth_sessions")
+}
+
+// ─────────────────────────── rooms ───────────────────────────
+
+model Room {
+  id     String @id @db.Uuid
+  code   String @unique @db.VarChar(8)
+  name   String @db.VarChar(60)
+  topic  String? @db.VarChar(120)
+  hostId String @map("host_id") @db.Uuid
+  host   User   @relation("RoomHost", fields: [hostId], references: [id], onDelete: Restrict)
+
+  privacy         String  @default("private") @db.VarChar(16)
+  passcodeHash    String? @map("passcode_hash")
+  maxParticipants Int     @default(8) @map("max_participants") @db.SmallInt
+  allowGuests     Boolean @default(false) @map("allow_guests")
+
+  playbackControl    String  @default("everyone") @map("playback_control") @db.VarChar(20)
+  chatLocked         Boolean @default(false) @map("chat_locked")
+  slowModeSec        Int     @default(0) @map("slow_mode_sec") @db.SmallInt
+  waitForSlow        Boolean @default(false) @map("wait_for_slow")
+  callEnabled        Boolean @default(true) @map("call_enabled")
+  screenshareEnabled Boolean @default(true) @map("screenshare_enabled")
+
+  status       String   @default("active") @db.VarChar(16)
+  lastActiveAt DateTime @default(now()) @map("last_active_at") @db.Timestamptz
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+  endedAt      DateTime? @map("ended_at") @db.Timestamptz
+
+  participants   RoomParticipant[]
+  bans           RoomBan[]
+  videoState     RoomVideoState?
+  videoHistory   RoomVideoHistory[]
+  messages       Message[]
+  notes          RoomNotes?
+  noteItems      NoteItem[]
+  checklistItems ChecklistItem[]
+  studySessions  StudySession[]
+  events         RoomEvent[]
+  reports        Report[]
+
+  @@index([hostId], map: "rooms_host_idx")
+  @@index([lastActiveAt(sort: Desc)], map: "rooms_active_idx")
+  @@map("rooms")
+}
+
+model RoomParticipant {
+  roomId String @map("room_id") @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  room   Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  role           String    @default("member") @db.VarChar(10)
+  firstJoinedAt  DateTime  @default(now()) @map("first_joined_at") @db.Timestamptz
+  lastJoinedAt   DateTime  @default(now()) @map("last_joined_at") @db.Timestamptz
+  leftAt         DateTime? @map("left_at") @db.Timestamptz
+  totalSeconds   Int       @default(0) @map("total_seconds")
+  forceMuted     Boolean   @default(false) @map("force_muted")
+
+  @@id([roomId, userId])
+  @@index([userId, lastJoinedAt(sort: Desc)], map: "room_participants_user_idx")
+  @@map("room_participants")
+}
+
+model RoomBan {
+  roomId   String @map("room_id") @db.Uuid
+  userId   String @map("user_id") @db.Uuid
+  bannedBy String @map("banned_by") @db.Uuid
+  room     Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user     User   @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
+  issuer   User   @relation("BanIssuer", fields: [bannedBy], references: [id], onDelete: Cascade)
+
+  reason    String?  @db.VarChar(200)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@id([roomId, userId])
+  @@map("room_bans")
+}
+
+// ─────────────────────────── video ───────────────────────────
+
+/// Durable snapshot of the authoritative timeline. Redis holds the live truth;
+/// this row is what we rehydrate from when Redis is cold (PLAN.md §8.11).
+model RoomVideoState {
+  roomId String @id @map("room_id") @db.Uuid
+  room   Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  provider    String  @default("none") @db.VarChar(10)
+  videoRef    String? @map("video_ref")
+  title       String?
+  durationSec Int?    @map("duration_sec")
+
+  status          String   @default("paused") @db.VarChar(10)
+  anchorPosition  Float    @default(0) @map("anchor_position")
+  anchorServerMs  BigInt   @default(0) @map("anchor_server_ms")
+  playbackRate    Float    @default(1) @map("playback_rate")
+  revision        BigInt   @default(0)
+  lastActorId     String?  @map("last_actor_id") @db.Uuid
+  lastActor       User?    @relation(fields: [lastActorId], references: [id], onDelete: SetNull)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("room_video_state")
+}
+
+model RoomVideoHistory {
+  id          String   @id @db.Uuid
+  roomId      String   @map("room_id") @db.Uuid
+  room        Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  provider    String   @db.VarChar(10)
+  videoRef    String   @map("video_ref")
+  title       String?
+  durationSec Int?     @map("duration_sec")
+  addedBy     String?  @map("added_by") @db.Uuid
+  adder       User?    @relation(fields: [addedBy], references: [id], onDelete: SetNull)
+  watchedSec  Int      @default(0) @map("watched_sec")
+  startedAt   DateTime @default(now()) @map("started_at") @db.Timestamptz
+  endedAt     DateTime? @map("ended_at") @db.Timestamptz
+
+  @@index([roomId, startedAt(sort: Desc)], map: "room_video_history_room_idx")
+  @@map("room_video_history")
+}
+
+// ─────────────────────────── chat ───────────────────────────
+
+model Message {
+  id          String  @id @db.Uuid
+  roomId      String  @map("room_id") @db.Uuid
+  room        Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId      String? @map("user_id") @db.Uuid
+  author      User?   @relation("MessageAuthor", fields: [userId], references: [id], onDelete: SetNull)
+  /// Idempotency key for optimistic sends; makes a retry after reconnect safe.
+  clientMsgId String? @map("client_msg_id")
+
+  body      String
+  kind      String  @default("user") @db.VarChar(8)
+  replyToId String? @map("reply_to_id") @db.Uuid
+  replyTo   Message? @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies   Message[] @relation("MessageReplies")
+  videoTs   Float?   @map("video_ts")
+
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+  deletedBy String?   @map("deleted_by") @db.Uuid
+  deleter   User?     @relation("MessageDeleter", fields: [deletedBy], references: [id], onDelete: SetNull)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  reports Report[]
+
+  @@index([roomId, createdAt(sort: Desc)], map: "messages_room_time_idx")
+  @@unique([roomId, userId, clientMsgId], map: "messages_client_dedupe_idx")
+  @@map("messages")
+}
+
+// ─────────────────────────── study tools ───────────────────────────
+
+model RoomNotes {
+  roomId    String   @id @map("room_id") @db.Uuid
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  content   String   @default("")
+  /// Phase 7: Yjs state vector. Unused in v1's block-locking approach (§8.12).
+  ydoc      Bytes?
+  version   BigInt   @default(0)
+  updatedBy String?  @map("updated_by") @db.Uuid
+  updater   User?    @relation(fields: [updatedBy], references: [id], onDelete: SetNull)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("room_notes")
+}
+
+/// Notes, questions and bookmarks are one table with a `kind` discriminator —
+/// they differ only in how they render and whether they can be resolved.
+model NoteItem {
+  id     String  @id @db.Uuid
+  roomId String  @map("room_id") @db.Uuid
+  room   Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId String? @map("user_id") @db.Uuid
+  author User?   @relation("NoteAuthor", fields: [userId], references: [id], onDelete: SetNull)
+
+  kind     String  @db.VarChar(10)
+  body     String  @db.VarChar(1000)
+  videoRef String? @map("video_ref")
+  /// Null means "not pinned to a moment in the video".
+  videoTs  Float?  @map("video_ts")
+
+  resolvedAt DateTime? @map("resolved_at") @db.Timestamptz
+  resolvedBy String?   @map("resolved_by") @db.Uuid
+  resolver   User?     @relation("NoteResolver", fields: [resolvedBy], references: [id], onDelete: SetNull)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  replies NoteReply[]
+
+  @@index([roomId, videoTs], map: "note_items_room_ts_idx")
+  @@map("note_items")
+}
+
+model NoteReply {
+  id         String   @id @db.Uuid
+  noteItemId String   @map("note_item_id") @db.Uuid
+  noteItem   NoteItem @relation(fields: [noteItemId], references: [id], onDelete: Cascade)
+  userId     String?  @map("user_id") @db.Uuid
+  author     User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  body       String   @db.VarChar(1000)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@map("note_replies")
+}
+
+model ChecklistItem {
+  id     String @id @db.Uuid
+  roomId String @map("room_id") @db.Uuid
+  room   Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  label String @db.VarChar(200)
+  /// Fractional index — reordering is one UPDATE, never a renumbering pass.
+  position Float
+
+  createdBy String? @map("created_by") @db.Uuid
+  creator   User?   @relation("ChecklistCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  completedAt DateTime? @map("completed_at") @db.Timestamptz
+  completedBy String?   @map("completed_by") @db.Uuid
+  completer   User?     @relation("ChecklistCompleter", fields: [completedBy], references: [id], onDelete: SetNull)
+
+  videoTs   Float?   @map("video_ts")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([roomId, position], map: "checklist_room_pos_idx")
+  @@map("checklist_items")
+}
+
+// ─────────────────────────── analytics-lite & safety ───────────────────────────
+
+model StudySession {
+  id            String    @id @db.Uuid
+  roomId        String    @map("room_id") @db.Uuid
+  room          Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId        String    @map("user_id") @db.Uuid
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt      DateTime  @default(now()) @map("joined_at") @db.Timestamptz
+  leftAt        DateTime? @map("left_at") @db.Timestamptz
+  seconds       Int?
+  inCallSeconds Int       @default(0) @map("in_call_seconds")
+
+  @@index([userId, joinedAt(sort: Desc)], map: "study_sessions_user_idx")
+  @@map("study_sessions")
+}
+
+model Report {
+  id         String  @id @db.Uuid
+  reporterId String? @map("reporter_id") @db.Uuid
+  reporter   User?   @relation("Reporter", fields: [reporterId], references: [id], onDelete: SetNull)
+
+  targetType String @map("target_type") @db.VarChar(10)
+  targetId   String @map("target_id") @db.Uuid
+  roomId     String? @map("room_id") @db.Uuid
+  room       Room?   @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  messageId  String? @map("message_id") @db.Uuid
+  message    Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  reason  String  @db.VarChar(20)
+  details String? @db.VarChar(1000)
+  /// Frozen copy of the reported content, so deleting it doesn't destroy evidence.
+  snapshot Json?
+
+  status     String    @default("open") @db.VarChar(12)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  resolvedAt DateTime? @map("resolved_at") @db.Timestamptz
+
+  @@index([status, createdAt], map: "reports_status_idx")
+  @@map("reports")
+}
+
+/// Audit trail, for when a moderation decision is disputed. 90-day retention.
+model RoomEvent {
+  id        String   @id @db.Uuid
+  roomId    String   @map("room_id") @db.Uuid
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  actorId   String?  @map("actor_id") @db.Uuid
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  type      String   @db.VarChar(32)
+  payload   Json?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([roomId, createdAt(sort: Desc)], map: "room_events_room_idx")
+  @@map("room_events")
+}

@@ -1,0 +1,89 @@
+# Local development services for SyncStudy (PLAN.md §16.1).
+#
+#   pnpm services:up     # docker compose -f infra/docker-compose.dev.yml up -d
+#   pnpm services:down
+#
+# Compose resolves ${VAR} against `infra/.env` (the project directory is the one
+# holding this file), NOT the repo-root `.env`. Every variable below therefore
+# carries a default that matches `.env.example`, so the stack comes up correctly
+# with no extra configuration. Override by creating `infra/.env` if you need to.
+
+name: syncstudy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: syncstudy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-syncstudy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-syncstudy}
+      POSTGRES_DB: ${POSTGRES_DB:-syncstudy}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `pnpm db:push` runs seconds after `services:up`; without this it races
+      # the initdb bootstrap and fails with "the database system is starting up".
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-syncstudy} -d ${POSTGRES_DB:-syncstudy}']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    container_name: syncstudy-redis
+    restart: unless-stopped
+    # Live room state is a cache with a durable Postgres snapshot behind it
+    # (PLAN.md §6.5), so AOF is off — but a bounded maxmemory with an LRU policy
+    # matches Upstash's behaviour and surfaces key-growth bugs locally.
+    command: >
+      redis-server
+      --save ''
+      --appendonly no
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    container_name: syncstudy-coturn
+    restart: unless-stopped
+    # The config is mounted read-only rather than baked in, so the hardening in
+    # infra/coturn/turnserver.conf is reviewable in git and identical to the file
+    # deployed to the Hetzner box (PLAN.md §9.3).
+    # The relay range is a DEV-ONLY override passed on the command line, so
+    # turnserver.conf stays byte-identical to the production copy. In production
+    # coturn uses its default 49152-65535, which matches total-quota=200.
+    command:
+      [
+        '-c',
+        '/etc/coturn/turnserver.conf',
+        '--min-port=49160',
+        '--max-port=49200',
+      ]
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    ports:
+      - '${TURN_PORT:-3478}:3478/udp'
+      - '${TURN_PORT:-3478}:3478/tcp'
+      - '${TURN_TLS_PORT:-5349}:5349/udp'
+      - '${TURN_TLS_PORT:-5349}:5349/tcp'
+      # Matches the --min-port/--max-port dev override in `command:` above.
+      # 41 relay ports is plenty for local testing; production uses the default
+      # range and does not publish through a userland proxy at all.
+      - '49160-49200:49160-49200/udp'
+
+volumes:
+  pgdata:
+  redisdata:

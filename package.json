@@ -1,0 +1,33 @@
+{
+  "name": "syncstudy",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/*\" dev",
+    "dev:web": "pnpm --filter @syncstudy/web dev",
+    "dev:realtime": "pnpm --filter @syncstudy/realtime dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm -r --filter \"./packages/*\" test",
+    "db:generate": "pnpm --filter @syncstudy/db generate",
+    "db:migrate": "pnpm --filter @syncstudy/db migrate",
+    "db:push": "pnpm --filter @syncstudy/db push",
+    "db:studio": "pnpm --filter @syncstudy/db studio",
+    "db:seed": "pnpm --filter @syncstudy/db seed",
+    "services:up": "docker compose -f infra/docker-compose.dev.yml up -d",
+    "services:down": "docker compose -f infra/docker-compose.dev.yml down",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json,css}\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3",
+    "prettier-plugin-tailwindcss": "^0.6.9"
+  }
+}

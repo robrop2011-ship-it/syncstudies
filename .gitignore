@@ -1,0 +1,17 @@
+node_modules/
+.next/
+dist/
+build/
+out/
+coverage/
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+!.env.example
+.DS_Store
+.turbo/
+.vercel/
+playwright-report/
+test-results/
+prisma/*.db
