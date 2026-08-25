@@ -19,8 +19,14 @@ import type { TypedSocket } from '../handlers/context.js';
 import { keys, type ScriptedRedis } from '../redis.js';
 import type { TokenBucket } from '../ratelimit/tokenBucket.js';
 
-/** §11.4: "if (await connCount(ip(socket)) > 12) return next(new Error(...))". */
-export const MAX_CONNECTIONS_PER_IP = 12;
+/**
+ * §11.4: "if (await connCount(ip(socket)) > 12) return next(new Error(...))".
+ *
+ * The default; `MAX_CONNECTIONS_PER_IP` in the environment overrides it, which
+ * exists so a load test driving 500 sockets from one loopback address measures
+ * the server instead of measuring this check.
+ */
+export const DEFAULT_MAX_CONNECTIONS_PER_IP = 12;
 
 /**
  * Entries older than this are treated as leaked (a node died holding sockets)
@@ -44,6 +50,7 @@ export interface HandshakeDeps {
   allowedOrigins: string[];
   ipHashSalt: string;
   nodeId: string;
+  maxConnectionsPerIp?: number | undefined;
 }
 
 /**
@@ -166,7 +173,7 @@ async function authenticate(socket: TypedSocket, deps: HandshakeDeps): Promise<H
     return 'server_error';
   }
 
-  if (connections > MAX_CONNECTIONS_PER_IP) {
+  if (connections > (deps.maxConnectionsPerIp ?? DEFAULT_MAX_CONNECTIONS_PER_IP)) {
     await releaseConnection(deps.redis, ipHash, socket.id);
     deps.log.warn({ socketId: socket.id, connections }, 'handshake rejected: too many connections');
     return 'too_many_connections';

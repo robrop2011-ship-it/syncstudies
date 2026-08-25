@@ -5,10 +5,10 @@
 # hard gate: GitHub fails the job on the first non-zero exit, and nothing here uses
 # `continue-on-error`.
 #
-# Postgres and Redis are started as service containers even though today's suites
-# are pure unit tests. The integration layer (§15.1 — real Postgres + Redis, socket
-# handlers end to end) lands in Phase 3, and having the services already wired means
-# that change is a new test file rather than a CI archaeology session.
+# Postgres and Redis run as service containers because the integration layer
+# (§15.1) genuinely needs them: those suites boot the real realtime server on an
+# ephemeral port and drive real sockets against real storage. `pnpm test` stays
+# service-free so a clean machine can run it.
 
 name: CI
 
@@ -117,6 +117,12 @@ jobs:
 
       - name: Unit tests
         run: pnpm test
+
+      # §15.1's integration layer: real Postgres, real Redis, real sockets. Kept
+      # a separate step so a failure here is distinguishable at a glance from a
+      # unit-test failure — they fail for very different reasons.
+      - name: Integration tests
+        run: pnpm --filter @syncstudy/realtime test:integration
 
       - name: Build
         run: pnpm build

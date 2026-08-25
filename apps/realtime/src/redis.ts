@@ -143,6 +143,32 @@ export const keys = {
   socket: (socketId: string) => `sock:${socketId}`,
   /** STRING, 1h — roomId cache for hot join lookups. */
   roomCode: (code: string) => `code:${code}`,
+  /**
+   * STRING, 2m — the MessageView a `clientMsgId` already produced (§3.5 H4).
+   *
+   * In Redis rather than in-process because the retry that needs it is the one
+   * that follows a reconnect, and a reconnect is exactly when the client lands
+   * on a different node. Node-local memoisation would miss the only case this
+   * exists for.
+   */
+  chatDedupe: (roomId: string, userId: string, clientMsgId: string) =>
+    `chat:dup:${roomId}:${userId}:${clientMsgId}`,
+  /** STRING, 5m — epoch ms of a user's last accepted message, for slow mode. */
+  chatLast: (roomId: string, userId: string) => `chat:last:${roomId}:${userId}`,
+  /** COUNTER, 30s from first use — how often this exact body was sent (§11.6). */
+  chatRepeat: (roomId: string, userId: string, hash: string) =>
+    `chat:rep:${roomId}:${userId}:${hash}`,
+  /**
+   * HASH, 6h — the live shared-notes document (§8.12, Amendment A3).
+   *
+   * `blockId` → block JSON, plus two reserved fields for the document version
+   * and the ordering. Live in Redis for the same reason the video anchor is:
+   * a keystroke-rate document cannot round-trip Postgres, and losing it costs
+   * at most one debounce window because the durable copy is `room_notes`.
+   */
+  roomNotes: (roomId: string) => `room:${roomId}:notes`,
+  /** STRING, 8s — soft edit lock on one block, refreshed while typing (§8.12). */
+  noteBlockLock: (roomId: string, blockId: string) => `room:${roomId}:notelock:${blockId}`,
 } as const;
 
 /** Pub/sub channels. */

@@ -7,12 +7,15 @@
  * "ghost joins") — every join is re-authorised from scratch.
  */
 import {
+  INITIAL_MESSAGE_COUNT,
+  MESSAGE_BACKFILL_MAX,
   Schemas,
   normalizeRoomCode,
   type JoinAck,
-  type NotesDocView,
   type RoomSnapshot,
 } from '@syncstudy/shared';
+import { listMessages } from '../chat/messages.js';
+import { listChecklist, listNoteItems } from '../notes/items.js';
 import { LIMITS } from '../ratelimit/tokenBucket.js';
 import { keys } from '../redis.js';
 import { releaseConnection } from '../auth/handshake.js';
@@ -28,10 +31,10 @@ import {
   type TypedSocket,
 } from './context.js';
 import { localRoomSize, removeParticipantAndBroadcast } from './presence.js';
+import { leaveCall } from './rtc.js';
 import { participantsPerRoom, socketConnections, roomsActive } from '../metrics.js';
 
-/** Phase 5/7 fill these; the shape is fixed now so the client can be written against it. */
-const EMPTY_NOTES: NotesDocView = { content: '', version: 0, updatedAt: 0 };
+
 
 function ackError(code: string, message: string): JoinAck {
   return { ok: false, code, message };
@@ -41,13 +44,30 @@ export async function buildSnapshot(
   ctx: AppContext,
   roomId: string,
   userId: string,
+  opts: { sinceMessageId?: string } = {},
 ): Promise<RoomSnapshot | null> {
   const meta = await ctx.meta.byId(roomId);
   if (!meta) return null;
 
-  const [state, participants] = await Promise.all([
+  // Land this node's queued messages before reading the transcript, so a message
+  // broadcast a moment ago is in the page the joiner receives. Bounded (§6.5) —
+  // a database that has stopped answering must not hold a join open.
+  await ctx.chat.settle();
+
+  const [state, participants, chat, notes, noteItems, checklist] = await Promise.all([
     ctx.store.getOrHydrate(roomId),
     ctx.store.listParticipants(roomId),
+    listMessages(
+      roomId,
+      opts.sinceMessageId === undefined
+        ? { limit: INITIAL_MESSAGE_COUNT }
+        : { after: opts.sinceMessageId, limit: MESSAGE_BACKFILL_MAX },
+    ),
+    // The document comes from Redis (hydrating from Postgres on a cold room),
+    // so it is not subject to the write-behind window the transcript is.
+    ctx.notes.store.view(roomId),
+    listNoteItems(roomId),
+    listChecklist(roomId),
   ]);
 
   const me = participants.find((p) => p.userId === userId);
@@ -60,13 +80,10 @@ export async function buildSnapshot(
     video: state.anchor,
     // Read as late as possible: the client's drift maths is relative to this.
     serverMs: Date.now(),
-    // Chat (Phase 5) and study tools (Phase 7) are not implemented yet. The
-    // fields are present and empty rather than absent, so the client renders an
-    // empty state instead of crashing on `undefined`.
-    messages: [],
-    notes: EMPTY_NOTES,
-    noteItems: [],
-    checklist: [],
+    messages: chat.messages,
+    notes,
+    noteItems,
+    checklist,
     you: resolvePermissions(role, meta.policy),
   };
 }
@@ -180,7 +197,13 @@ export function registerRoomHandlers(ctx: AppContext, socket: TypedSocket): void
           ctx.store.touch(roomId),
         ]);
 
-        const snapshot = await buildSnapshot(ctx, roomId, userId);
+        // A reconnect carries the cursor; a fresh join does not, and gets the
+        // newest page instead.
+        const snapshot = await buildSnapshot(ctx, roomId, userId, {
+          ...(parsed.data.lastMessageId === undefined
+            ? {}
+            : { sinceMessageId: parsed.data.lastMessageId }),
+        });
         if (!snapshot) {
           ack(ackError('room_not_found', 'No room with that code.'));
           return;
@@ -189,6 +212,10 @@ export function registerRoomHandlers(ctx: AppContext, socket: TypedSocket): void
         const isReconnect = existing !== null;
         if (existing === null) {
           socket.to(roomChannel(roomId)).emit('presence:join', { participant: toParticipant(entry) });
+          // After the snapshot is built, so the joiner does not read their own
+          // arrival in the history they are handed — they receive it as a live
+          // broadcast like everyone else, in the same order everyone else sees.
+          ctx.chat.system(roomId, `join:${userId}`, `${entry.displayName} joined`);
         } else if (existing.connState !== 'connected') {
           socket
             .to(roomChannel(roomId))
@@ -282,11 +309,20 @@ export function registerRoomHandlers(ctx: AppContext, socket: TypedSocket): void
             });
         }
 
-        // Always a full snapshot. §8.8: a delta resync is not worth the
-        // complexity at 4–20 KB, and it is one more thing that can disagree with
-        // the client. `lastRevision` and `lastMessageId` are accepted and will
-        // drive chat backfill in Phase 5.
-        const snapshot = await buildSnapshot(ctx, roomId, socket.data.userId);
+        // Always a full snapshot of room state. §8.8: a delta resync is not
+        // worth the complexity at 4–20 KB, and it is one more thing that can
+        // disagree with the client.
+        //
+        // Chat is the exception, and the reason is size rather than principle: a
+        // transcript is unbounded where a participant list is not. `lastMessageId`
+        // turns the snapshot's chat page into "everything you missed" instead of
+        // "the newest fifty", so a 90-second outage in a busy room comes back
+        // with no gap. The client merges by id either way.
+        const snapshot = await buildSnapshot(ctx, roomId, socket.data.userId, {
+          ...(parsed.data.lastMessageId === undefined
+            ? {}
+            : { sinceMessageId: parsed.data.lastMessageId }),
+        });
         if (!snapshot) {
           ack(ackError('room_not_found', 'That room no longer exists.'));
           return;
@@ -364,6 +400,11 @@ export function registerDisconnectHandler(ctx: AppContext, socket: TypedSocket):
       if (stillConnectedElsewhere) return;
 
       if (entry) {
+        // §9.5: an ungraceful leave is detected by the socket disconnect (~5 s),
+        // not by ICE timeout (~30 s). The room membership survives the grace
+        // period; the call does not — peers close their RTCPeerConnections now
+        // and the client re-joins the call when it reconnects.
+        await leaveCall(ctx, roomId, userId);
         await ctx.store.updateParticipant(roomId, userId, {
           connState: 'reconnecting',
           speaking: false,

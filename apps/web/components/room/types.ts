@@ -22,6 +22,23 @@ export interface RoomViewer {
   avatarUrl: string | null;
 }
 
+/**
+ * The account settings the room actually acts on, resolved server-side.
+ *
+ * Read here rather than fetched by the call layer because they decide the very
+ * first thing that happens when someone presses "Join voice" — arriving unmuted
+ * because a preference had not loaded yet is not a defect you can apologise for
+ * afterwards (§11.9).
+ */
+export interface RoomPreferences {
+  joinMuted: boolean;
+  joinCameraOff: boolean;
+  pushToTalk: boolean;
+  /** Forces relay-only ICE so peers never learn this user's address (§11.5). */
+  hideIpFromPeers: boolean;
+  reduceMotion: boolean;
+}
+
 export interface RoomBootstrap {
   roomId: string;
   code: string;
@@ -34,6 +51,7 @@ export interface RoomBootstrap {
   /** Resolved from the room row, so host affordances render before the snapshot lands. */
   isHost: boolean;
   viewer: RoomViewer;
+  prefs: RoomPreferences;
 }
 
 /** Why a room stopped being joinable. Rendered by `RoomClosedScreen`. */

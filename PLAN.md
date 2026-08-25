@@ -3,6 +3,15 @@
 > **Status:** v1.1 blueprint · **Date:** 2026-08-23
 >
 > **Amendment A1 (v1.1) — accounts are website-only.** Email addresses, email verification, password-reset mail, and Google OAuth are removed from the design. An account is a **username + display name + password**, created on the site. A one-time **recovery code** replaces the reset-by-email flow. Consequences: no `email`/`oauth_accounts`/`verification_tokens` in the schema, no transactional-email provider in the stack or the cost model, and auth is a ~250-line first-party module instead of an auth library. See §3.1, §4.2, §7.2, §10.1, §11.1, §11.9, §14 Phase 2.
+> **Amendment A2 (v1.1) — chat's read-after-write hazard is part of the contract.** Building Phase 5 turned §6.5's write-behind rule from a performance note into something every *reader* of `messages` has to know about: a message is broadcast before it is in Postgres, so anything that reads it back within a few hundred milliseconds — a delete, a report, a join snapshot — must account for the queue. Two shipped features were broken by this and both passed their tests, because the tests slept first. Consequences: `room:join` gained an optional `lastMessageId` backfill cursor (§10.2), three chat keys were added to the Redis layout (§7.3), and the rule itself is written down as [ADR 0006](./docs/ADR/0006-chat-is-broadcast-first.md). See also [ADR 0007](./docs/ADR/0007-order-messages-by-id.md) on why the transcript is ordered by `id` and never by `created_at`.
+> **Amendment A3 (v1.2) — Phases 6-10 are built; four contract changes came with them.**
+> 1. **Two Redis keys for the live notes tier** (§7.3): `room:{id}:notes` (HASH, 6h — the block document) and `room:{id}:notelock:{blockId}` (STRING, 8s — the §8.12 soft lock). Same two-tier rule as everything else: a document being typed into cannot round-trip Postgres per keystroke, and losing Redis costs at most one debounce window because `room_notes.content` is re-split into blocks on the next cold read.
+> 2. **`NotesDocView` carries `blocks`** (§10.2). The client cannot mint block ids: an update for an id the server has never seen is a *new* block, so a client that invented them would duplicate the whole document on its first edit. `notes:block_updated` gained `position` for the same reason — a client that had to guess where a new paragraph goes would put a conflict-preserved copy at the end instead of below its winner.
+> 3. **A conflict does not write a marker into the user's text.** §8.12 said "appending it as a new block below with a marker". The loser's text is preserved verbatim as a new block below the winner, and the *loser* is told (the ack carries `winning`); the marker is UI, not content. Putting it in the text would corrupt the document and the §3.6 S7 export.
+> 4. **The shortcut sheet is `Ctrl`/`Cmd`+`/`, not `?`.** §12.5's own key table binds `?` to "new question at current timestamp" and its prose asks for "a `?`-triggered shortcut sheet". They are the same keystroke. `?` keeps the question — it is §2.5's retention feature — and the sheet also has an entry in the room menu.
+>
+> **Amendment A4 (v1.2) — `uuidv7` is monotonic within a millisecond.** ADR 0007 orders the transcript by `id` and nothing else, on the grounds that "id order is time order". That was only true at millisecond granularity: the original implementation drew fresh randomness on every call, so two ids minted in the same millisecond sorted arbitrarily against each other. Stably, on every client — but not in send order, which is a real defect for a burst, a retry, or two sends from one node. `uuidv7()` now increments the entropy while the millisecond is unchanged (RFC 9562 §6.2), and `uuidv7At()` is the pure form for tests. Found by an integration test, not by review.
+>
 > **Audience:** the engineer (human or AI coding agent) who will build this.
 > **Rule for the builder:** this document is the source of truth. Where it makes a decision, follow it. Where it says *"defer"*, do not build it yet. Where you disagree, change this document first, then the code.
 
@@ -18,6 +27,7 @@ This is not a pitch deck. It is a build spec. It is ordered so that you can impl
 | Building auth | §7, §11.1–11.3, §14 Phase 2 |
 | Building rooms | §7, §10, §14 Phase 3 |
 | Building the hard part (video sync) | **§8 in full** — this is the core IP of the product |
+| Building chat | §3.5, §6.5, §11.6, §14 Phase 5 — and Amendment A2 before you touch a read path |
 | Building calls | **§9 in full** |
 | Making it not look like AI slop | **§12** — has literal hex values and timing curves |
 | Deciding what to cut | §13 |
@@ -765,8 +775,14 @@ CREATE TABLE messages (
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX messages_room_time_idx ON messages (room_id, created_at DESC);
+-- Built WITHOUT the partial predicate, deliberately. Postgres treats NULLs as
+-- distinct in a unique index by default (NULLS DISTINCT), so system messages —
+-- which have a NULL user_id AND a NULL client_msg_id — never collide, and
+-- `WHERE client_msg_id IS NOT NULL` buys only a slightly smaller index. Prisma
+-- cannot express a partial index in the schema, so keeping the predicate would
+-- have meant a hand-written migration that the schema no longer describes.
 CREATE UNIQUE INDEX messages_client_dedupe_idx
-  ON messages (room_id, user_id, client_msg_id) WHERE client_msg_id IS NOT NULL;
+  ON messages (room_id, user_id, client_msg_id);
 
 -- ─────────────────────────── study tools ───────────────────────────
 CREATE TABLE room_notes (                       -- the one shared scratchpad
@@ -866,6 +882,11 @@ CREATE INDEX room_events_room_idx ON room_events (room_id, created_at DESC);
 | `rl:{scope}:{id}` | STRING (counter) | window | token-bucket state (§11.7) |
 | `sock:{socketId}` | HASH | conn | `userId, roomId, node` — for targeted disconnects on ban |
 | `code:{code}` | STRING | 1 h | roomId cache for hot join lookups |
+| `room:{id}:notes` | HASH | 6 h | the live shared document: `b:{blockId} → JSON{id,text,version,position}`, plus `__meta → JSON{version,updatedAt}` (Amendment A3). Absence of `__meta` is what "cold" means; hydration re-splits `room_notes.content` on blank lines. |
+| `room:{id}:notelock:{blockId}` | STRING | 8 s | the §8.12 soft edit lock — user id, refreshed while typing. Advisory: the per-block version check is what actually protects the text, because a lock that expires mid-sentence must not be able to lose work. |
+| `chat:dup:{roomId}:{userId}:{clientMsgId}` | STRING | 2 m | the `MessageView` that `client_msg_id` already produced, so an optimistic-send retry after a reconnect re-acks the original instead of broadcasting a second copy (§3.5 H4). In Redis rather than in-process because the retry that needs it follows a reconnect, which is exactly when the client lands on a different node. |
+| `chat:last:{roomId}:{userId}` | STRING | 5 m | epoch ms of a user's last accepted message — slow mode |
+| `chat:rep:{roomId}:{userId}:{bodyHash}` | COUNTER | 30 s from first use | identical-message suppression (§11.6) |
 
 **Data safety note:** Redis is the *live* truth but not the *durable* truth. Everything in Redis is either (a) reconstructible from Postgres (video state, ±15 s) or (b) inherently ephemeral (presence). Losing Redis costs at most 15 seconds of playback position and forces reconnects. That is an acceptable failure mode and it is why we can use a cheap Redis tier.
 
@@ -1528,7 +1549,7 @@ All responses `{ ok: true, data }` or `{ ok: false, error: { code, message, deta
 | POST | `/api/rooms/:code/join` | `{passcode?}` | `{roomId,wsToken}` | creates `room_participants` row |
 | PATCH | `/api/rooms/:id` | partial settings | `Room` | host/co-host only |
 | DELETE | `/api/rooms/:id` | — | 204 | host only; sets `status='ended'` |
-| GET | `/api/rooms/:id/messages` | `?before=<uuid>&limit=50` | `Message[]` | cursor pagination on uuidv7 |
+| GET | `/api/rooms/:id/messages` | `?before=<uuid>&limit=50` | `{messages, hasMore, nextCursor}` | cursor pagination on uuidv7; `limit` is clamped to `MESSAGE_PAGE_SIZE`. Membership, not presence: readable by anyone with a `room_participants` row, including in an ended or archived room. |
 | GET | `/api/rooms/:id/notes` | — | `{content,version,items[]}` | |
 | GET | `/api/rooms/:id/export` | — | `text/markdown` | notes + questions + checklist + timestamps |
 | POST | `/api/reports` | `{targetType,targetId,roomId?,reason,details?}` | 201 | rate: 10/day/user |
@@ -1543,14 +1564,14 @@ Namespace: default `/`. Rooms: `room:{roomId}`. All client→server events use a
 | Event | Payload | Ack | Rate limit |
 |---|---|---|---|
 | `time:ping` | `{t0:number}` | `{serverMs:number}` | 30 / 10 s |
-| `room:join` | `{roomCode:string}` | `{ok, snapshot?}` | 10 / min |
+| `room:join` | `{roomCode:string, lastMessageId?}` | `{ok, snapshot?}` | 10 / min |
 | `room:leave` | `{}` | `{ok}` | — |
 | `room:resync` | `{lastRevision?, lastMessageId?}` | `{ok, snapshot}` | 6 / min |
 | `video:set` | `{provider,videoRef,title?,durationSec?}` | `{ok, reason?}` | 10 / min |
 | `video:control` | `{action:'play'\|'pause'\|'seek'\|'rate', positionSec?, rate?, clientSentAtMs, expectedRevision}` | `{ok, reason?, anchor}` | **8 / 10 s** |
 | `video:buffering` | `{buffering:boolean, positionSec}` | — | 6 / 10 s |
-| `video:report_drift` | `{driftSec, corrections}` | — | 1 / 30 s (telemetry) |
-| `chat:send` | `{clientMsgId, body, replyToId?, videoTs?}` | `{ok, message?, reason?}` | **5 / 5 s**, burst 10 |
+| `video:report_drift` | `{driftP50, driftP95, hardSeeks, clockOffsetMs}` | — | 1 / 30 s (telemetry) |
+| `chat:send` | `{clientMsgId, body, replyToId?, videoTs?}` | `{ok, data: MessageView}` \| `{ok:false, code, message}` | **5 / 5 s**, burst 10 |
 | `chat:delete` | `{messageId}` | `{ok}` | 20 / min |
 | `chat:typing` | `{}` | — | 1 / 3 s |
 | `notes:block_focus` | `{blockId}` | — | 10 / 10 s |
@@ -1590,7 +1611,7 @@ Namespace: default `/`. Rooms: `room:{roomId}`. All client→server events use a
 | `presence:update` | `{userId, patch}` |
 | `video:state` | `{anchor: VideoAnchor, actorId\|null, reason:'control'\|'heartbeat'\|'auto_buffer'\|'resync'\|'set_video'}` |
 | `video:control_rejected` | `{reason:'stale_revision'\|'recently_changed'\|'not_permitted'\|'rate_limited', anchor}` |
-| `video:waiting` | `{waitingFor:userId[], until:number}` |
+| `video:waiting` | `{waitingFor:userId[], untilServerMs:number}` — empty list means the wait ended |
 | `chat:message` | `{message}` |
 | `chat:deleted` | `{messageId, by}` |
 | `chat:typing` | `{userId}` |
@@ -1985,7 +2006,9 @@ Headline: **"Watch lectures together, actually in sync."** Sub: one sentence on 
 - [ ] Room code brute-force is rate-limited and logged.
 - [ ] All Playwright E2E specs (§15.4) green.
 - [ ] Lighthouse: Performance ≥85, Accessibility ≥95 on `/` and `/r/[code]`.
-- [ ] Zero `dangerouslySetInnerHTML` on user content; CSP enforced (not report-only).
+- [ ] Three browser contexts exchange 500 messages with identical ordering on all three, no duplicates after a forced reconnect, and the transcript survives a reload.
+- [ ] Zero `dangerouslySetInnerHTML` on user content; CSP enforced (not report-only). Verify with a message body containing `<script>`, `javascript:` and a `data:` URL — all three must render as text.
+- [ ] `ss_write_behind_dropped_total` is zero after a load test, and the queue drains fully on SIGTERM.
 - [ ] Privacy policy and terms exist and are truthful.
 - [ ] Sentry receiving events from both apps; alerts wired to somewhere a human sees them.
 
@@ -2109,13 +2132,14 @@ Total to MVP: **≈ 10–12 weeks.**
 2. `chat:send` handler: validate → assign id/ts → broadcast → enqueue write-behind insert.
 3. Cursor pagination endpoint; infinite scroll upward with scroll-anchor preservation.
 4. Optimistic UI with pending/failed states and retry; dedupe on `client_msg_id`.
-5. Virtualized list above 200 messages; "N new messages" jump button when scrolled up.
+5. Virtualized list; "N new messages" jump button when scrolled up. *(Built virtualized at every size rather than above a 200-message threshold: the scroll logic — stick-to-bottom, prepend anchoring, load-ahead — is the hard part, and two rendering paths means getting it right twice.)*
 6. Linkification: URLs (safe anchor + blocklist check) and `@mm:ss` → seek control.
 7. System messages (joined/left/host changed/video changed) rendered as centred low-contrast lines, throttled so a flaky connection can't spam the transcript.
 8. Delete own / host delete any (tombstone, not hard delete); report flow + `/api/reports`.
-9. Rate limiting + identical-message suppression.
+9. Rate limiting + identical-message suppression (§11.6: the same body 3× in 30 s is dropped, counted from the FIRST occurrence so "ok" once every 25 seconds never trips it), plus slow-mode enforcement, which hosts and co-hosts bypass.
 
 **Dependencies:** Phase 3. (Independent of Phase 4 — can run in parallel with a second developer.)
+**The trap in this phase:** write-behind means a message is broadcast before it exists in Postgres. Every read-back path — delete, report, join snapshot — has to account for it, and a test that sleeps before asserting will not catch the ones that do not. See Amendment A2 and ADR 0006.
 **Testing:** integration (ordering under concurrent sends, dedupe on retry, pagination boundaries, deleted messages hidden but not gapped); E2E (send/receive across two contexts <300 ms, refresh preserves history, host deletes a message and both see it disappear); security (XSS payloads render as text; 3000-char body rejected).
 **Definition of done:** 3 contexts exchanging 500 messages with correct ordering everywhere, no duplicates after a forced reconnect, and virtualization keeping the page at 60 fps.
 
@@ -2462,7 +2486,16 @@ Because clients reconnect with a full `room:resync` (§8.8), a rolling deploy co
 | `ss_rtc_peer_state_total{state}` | counter | `failed` rate → TURN problems |
 | `ss_rtc_relay_ratio` | gauge | % of pairs using TURN → cost forecast |
 | `ss_ratelimit_hits_total{event}` | counter | abuse detection |
+| `ss_chat_messages_total{kind}` | counter | room activity, user vs system |
+| `ss_write_behind_depth{queue}` | gauge | **unwritten rows.** A depth that climbs and does not come back down means the transcript people are reading is ahead of the transcript that survives a restart |
+| `ss_write_behind_failures_total{queue}` | counter | batches that failed and were requeued |
+| `ss_write_behind_dropped_total{queue}` | counter | **rows discarded without ever reaching Postgres.** There is no acceptable rate for this |
+| `ss_handler_errors_total{event}` | counter | throws caught by the handler wrapper |
 | `nodejs_eventloop_lag_p99` | gauge | the canary for everything |
+
+`GET /health` also reports `pendingWrites` — deliberately *not* part of its `ok`, because a
+backed-up queue is a reason to look, not a reason to pull a node holding live sockets out of
+rotation.
 
 **Alerts (route to a phone, not an inbox):**
 
@@ -2474,6 +2507,8 @@ Because clients reconnect with a full `room:resync` (§8.8), a rolling deploy co
 | `ss_video_drift_seconds` p95 > 1.5 s over 10 min | high |
 | `ss_rtc_peer_state_total{state="failed"}` > 15% over 10 min | high (TURN likely down) |
 | event-loop lag p99 > 200 ms | high |
+| `ss_write_behind_dropped_total` increases at all | page (durable data is being lost) |
+| `ss_write_behind_depth` > 500 for 2 min | high (Postgres is not keeping up) |
 | socket connections > 80% of `soft_limit` | warn (scale up) |
 | TURN egress > 60% of monthly allowance | warn (cost) |
 
@@ -2779,16 +2814,33 @@ If you remember nothing else from this document:
 
 1. **The server owns an anchor, not a position.** `{position, serverTimestamp, status}` + a shared `positionAt()` function is the whole sync engine. Everything else is tuning.
 2. **Mesh WebRTC, capped, with an SFU interface ready.** It makes calls free for the group sizes this product actually has, and the migration is a factory swap, not a rewrite.
-3. **Redis for live truth, Postgres for durable truth, and nothing important lives only in Redis.** This is what lets you run a cheap Redis and survive it going down.
+3. **Redis for live truth, Postgres for durable truth, and nothing important lives only in Redis.** This is what lets you run a cheap Redis and survive it going down. Its corollary, learned the hard way in Phase 5: **something broadcast is not yet something stored.** Every read-back path has to know that (Amendment A2, ADR 0006).
 4. **One shared contract package.** Zod schemas + typed Socket.IO generics eliminate the most common realtime bug class at compile time.
 5. **Restraint in the UI.** Borders not shadows, one accent, 120–160 ms transitions, no glow, no blur, no gradients. A study tool should look like a tool.
 
 ### 20.2 Immediate next steps
 
-1. Create the monorepo and get Phase 1's deploy-and-ping working end to end. Don't design more until a browser can ping the deployed socket server.
-2. Build Phase 2 auth **including** the socket handshake integration — that seam is load-bearing and finding a problem in it later is expensive.
-3. Build the sync simulator harness **before** the sync engine feels finished. It is how you'll know whether it works.
-4. Keep `docs/BACKLOG.md` and put every good idea that isn't in §13 into it, immediately, without discussion.
+This section is about **where the build is**, not about the design — so it is the one part
+of this document that changes as code lands. What is true today lives in
+[`docs/HANDOFF.md`](./docs/HANDOFF.md); this is the short version.
+
+Phases 1–5 are built. The next three, in the order they should be taken:
+
+1. **Phase 6 — voice.** Deploy coturn *before* writing any client code, and verify a real
+   relay with `getStats()`. Perfect negotiation is mandatory, not optional (§9.2). Build
+   `MeshTransport` behind the `CallTransport` interface so the SFU swap later is a factory
+   call rather than a rewrite.
+2. **Phase 7 — study tools.** Block-locked last-write-wins notes (§8.12), and the
+   timestamped notes/questions/bookmarks that the Phase 4 scrubber was built to display.
+3. **Phase 9 — the testing gap, which is now the largest quality risk in the project.**
+   There are zero integration tests and zero E2E tests. Every serious bug found so far —
+   the stale room cache, the ghost memberships, the hard-seek counter, the chat
+   read-after-write races — was found by running real clients against real services, and
+   none of them was visible to `pnpm test`. CI already provisions Postgres and Redis, so
+   this is new files rather than a CI change.
+
+And the standing rule, which has not changed: keep `docs/BACKLOG.md`, and put every good
+idea that is not in §13 into it immediately, without discussion.
 
 ---
 

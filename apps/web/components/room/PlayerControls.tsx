@@ -34,11 +34,20 @@ import {
   VolumeX,
   type LucideIcon,
 } from 'lucide-react';
-import { formatTimestamp, type PlaybackControlPolicy } from '@syncstudy/shared';
+import {
+  clientId,
+  formatTimestamp,
+  type MessageView,
+  type PlaybackControlPolicy,
+} from '@syncstudy/shared';
+import { toast } from 'sonner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Scrubber, type ScrubberTick } from '@/components/room/Scrubber';
 import { SyncStatus } from '@/components/room/SyncStatus';
 import { useVideoAnchor } from '@/lib/stores/room-store';
+import { useSocket } from '@/lib/socket/provider';
+import { useCall } from '@/lib/call/provider';
+import { ackWithTimeout } from '@/components/room/socket-ack';
 import type { SyncController } from '@/lib/sync/controller';
 import { usePlayheadRef, useSyncController, useSyncStatus } from '@/lib/sync/useSyncController';
 import { cn } from '@/lib/utils';
@@ -104,12 +113,14 @@ export function PlayerControls({
   playbackControl,
   hostName,
   ticks,
+  onTickSeek,
   className,
 }: {
   canControl: boolean;
   playbackControl: PlaybackControlPolicy;
   hostName: string;
   ticks?: readonly ScrubberTick[] | undefined;
+  onTickSeek?: ((positionSec: number) => void) | undefined;
   className?: string | undefined;
 }) {
   const video = useVideoAnchor();
@@ -117,9 +128,17 @@ export function PlayerControls({
   const controller = useSyncController();
   const playheadRef = usePlayheadRef();
 
+  const socket = useSocket();
+  // §12.5: with push-to-talk on, Space is the talk key and no longer toggles
+  // playback. Read here rather than relying on `defaultPrevented` from the call
+  // bar's listener — two window listeners fire in registration order, and
+  // registration order across two components is not something to bet on.
+  const pushToTalk = useCall().preferences.pushToTalk;
+
   const timeRef = useRef<HTMLSpanElement | null>(null);
   const [pending, setPending] = useState<'playing' | 'paused' | null>(null);
   const [probedDuration, setProbedDuration] = useState(0);
+  const [requested, setRequested] = useState(false);
 
   const hasVideo = video.provider !== 'none' && video.videoRef !== null;
   const duration = video.durationSec ?? probedDuration;
@@ -162,7 +181,41 @@ export function PlayerControls({
     setProbedDuration(0);
   }, [video.videoRef]);
 
+  // Being granted control answers the request; the button should not still read
+  // "Requested" underneath a bar that now works.
+  useEffect(() => {
+    if (canControl) setRequested(false);
+  }, [canControl]);
+
   const showPlaying = pending === null ? video.status === 'playing' : pending === 'playing';
+
+  /**
+   * "Can I have playback control?" as an ordinary chat message.
+   *
+   * The button latches on success rather than resetting on a timer: asking twice
+   * in a row is how a polite request becomes nagging, and the answer arrives in
+   * the same panel the request went to.
+   */
+  const requestControl = useCallback((): void => {
+    if (socket === null || requested) return;
+    setRequested(true);
+    void ackWithTimeout<MessageView>((ack) =>
+      socket.emit(
+        'chat:send',
+        { clientMsgId: clientId(), body: 'Could I have playback control?' },
+        ack,
+      ),
+    ).then((ack) => {
+      if (ack.ok) {
+        toast.success('Asked in chat.');
+        return;
+      }
+      // Un-latch, or a failed request leaves a button that says "Requested" and
+      // a chat with nothing in it.
+      setRequested(false);
+      toast.error(ack.message);
+    });
+  }, [requested, socket]);
 
   const toggle = useCallback((): void => {
     if (!enabled || controller === null) return;
@@ -200,6 +253,7 @@ export function PlayerControls({
       switch (event.key) {
         case ' ':
         case 'Spacebar':
+          if (pushToTalk) return;
           if (isActivatable(event.target)) return;
           event.preventDefault();
           actions.current.toggle();
@@ -231,7 +285,7 @@ export function PlayerControls({
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, []);
+  }, [pushToTalk]);
 
   const lockNote = canControl ? null : whoCanControl(playbackControl, hostName);
   const disabledReason = lockNote ?? (hasVideo ? 'The player is still loading' : 'No video yet');
@@ -249,6 +303,7 @@ export function PlayerControls({
           getBuffered={controller === null ? undefined : () => controller.getBufferedFraction()}
           disabled={!enabled}
           ticks={ticks}
+          onTickSeek={onTickSeek}
           onPreview={(seconds) => controller?.previewSeek(seconds)}
           onCommit={(seconds) => {
             void controller?.commitSeek(seconds);
@@ -306,28 +361,38 @@ export function PlayerControls({
               <span className="hidden truncate lg:inline">{lockNote}</span>
               <span className="sr-only lg:hidden">{lockNote}</span>
             </span>
-            {/* Not wired to anything, and deliberately not faked: the request is a
-                chat message, and chat is Phase 5. A button that pretends to have
-                sent something is worse than one that says it cannot yet. */}
+            {/* The request IS a chat message — there is no `video:request_control`
+                event, and there should not be one. A request for a social
+                permission belongs in the conversation where it can be answered,
+                not in a notification nobody can reply to. */}
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="hidden lg:inline-flex">
                   <button
                     type="button"
-                    disabled
-                    aria-label="Request control — arrives with chat in Phase 5"
+                    onClick={requestControl}
+                    disabled={requested}
+                    aria-label={
+                      requested
+                        ? 'Control requested in chat'
+                        : `Ask ${hostName} for playback control, in chat`
+                    }
                     className={cn(
-                      'inline-flex h-8 items-center rounded-md border border-border-strong px-2.5',
-                      'text-13 text-tertiary opacity-50',
+                      'inline-flex h-8 items-center rounded-md border border-border-strong px-2.5 text-13',
+                      'transition-colors duration-120 ease-standard',
+                      requested
+                        ? 'cursor-default text-tertiary'
+                        : 'text-primary hover:bg-surface-2',
                     )}
                   >
-                    Request control
+                    {requested ? 'Requested' : 'Request control'}
                   </button>
                 </span>
               </TooltipTrigger>
               <TooltipContent>
-                Asking for control sends a chat message — chat arrives in Phase 5. For now, ask{' '}
-                {hostName} out loud.
+                {requested
+                  ? `Asked in chat. ${hostName} can hand over playback from the People list.`
+                  : 'Sends a message in chat asking for playback control.'}
               </TooltipContent>
             </Tooltip>
           </>

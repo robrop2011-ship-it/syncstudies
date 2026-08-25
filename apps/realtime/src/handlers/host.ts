@@ -372,6 +372,14 @@ export function registerHostHandlers(ctx: AppContext, socket: TypedSocket): void
 
         // The room is ending; a resume broadcast would go to nobody.
         abandonWaitForSlow(roomId);
+        // The room's chat is over too. Any message still queued has already been
+        // broadcast and still belongs in Postgres, so the queue is left alone —
+        // this drops only the system-line throttle bookkeeping.
+        ctx.chat.forgetRoom(roomId);
+        // Land the document before dropping the live copy, or the last minute
+        // of shared notes dies with the room that produced them.
+        await ctx.notes.settle();
+        await ctx.notes.store.purge(roomId);
         await ctx.store.purgeRoom(roomId);
         await ctx.leader.untrack(roomId);
         await ctx.store.forgetRoomCode(session.roomCode);

@@ -85,8 +85,29 @@ export interface ChecklistItemView {
   videoTs: number | null;
 }
 
+/**
+ * One paragraph of the shared document (PLAN.md §8.12, Amendment A3).
+ *
+ * The client cannot mint these ids for existing text: an update for an id the
+ * server has never seen is a NEW block, so a client that invented ids would
+ * duplicate the whole document on its first edit. They arrive with the snapshot
+ * and with every broadcast; a client mints one only when a person genuinely
+ * starts a new paragraph.
+ */
+export interface NoteBlockView {
+  id: string;
+  text: string;
+  /** Per-block optimistic version — the `baseVersion` an update is checked against. */
+  version: number;
+  /** Fractional index. Inserting between two blocks is one write, never a renumber. */
+  position: number;
+}
+
 export interface NotesDocView {
+  /** Blocks joined by a blank line: the durable form, and what an export reads. */
   content: string;
+  blocks: NoteBlockView[];
+  /** Whole-document version, incremented on every accepted update. */
   version: number;
   updatedAt: number;
 }
@@ -231,7 +252,14 @@ export interface ServerToClientEvents {
   'chat:typing': (p: { userId: string }) => void;
 
   'notes:block_locked': (p: { blockId: string; userId: string; untilServerMs: number }) => void;
-  'notes:block_updated': (p: { blockId: string; text: string; version: number; by: string }) => void;
+  /** `text: ''` is a deleted paragraph — the only way to remove one (§8.12). */
+  'notes:block_updated': (p: {
+    blockId: string;
+    text: string;
+    version: number;
+    position: number;
+    by: string;
+  }) => void;
   'notes:item_created': (p: { item: NoteItemView }) => void;
   'notes:item_updated': (p: { item: NoteItemView }) => void;
   'notes:item_deleted': (p: { id: string }) => void;

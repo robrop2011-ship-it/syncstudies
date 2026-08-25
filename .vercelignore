@@ -1,0 +1,13 @@
+# The realtime service is NOT deployed to Vercel — it holds long-lived
+# WebSockets and per-room state, which a serverless function cannot. It has its
+# own Dockerfile and goes to a container host (see docs/DEPLOY.md).
+#
+# Excluded from the upload so a realtime-only change does not invalidate the
+# Vercel build cache, and so its dev-only scripts never reach the platform.
+apps/realtime/scripts
+apps/realtime/src/__integration__
+
+# Local state and test artefacts.
+**/.next
+**/node_modules
+**/.turbo

@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 const LINKS: ReadonlyArray<{ href: string; label: string }> = [
   { href: '/about', label: 'About' },
   { href: '/privacy', label: 'Privacy' },
+  { href: '/terms', label: 'Terms' },
   { href: '/join', label: 'Join a room' },
 ];
 

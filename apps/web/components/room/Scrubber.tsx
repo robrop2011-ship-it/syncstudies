@@ -29,11 +29,12 @@ import { useCallback, useEffect, useRef } from 'react';
 import { formatTimestamp } from '@syncstudy/shared';
 import { cn } from '@/lib/utils';
 
-/** A mark on the track. Phase 7 fills these with notes and questions (§12.4). */
+/** A note, question or bookmark pinned to a moment in the video (§3.6 S3). */
 export interface ScrubberTick {
   id: string;
   atSec: number;
   label: string;
+  kind: 'note' | 'question' | 'bookmark';
 }
 
 /** Keyboard seek steps, fixed by §12.5. */
@@ -49,6 +50,13 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+/** Read out loud by a screen reader, so it has to be a word rather than a colour. */
+const TICK_NOUN: Record<ScrubberTick['kind'], string> = {
+  note: 'note',
+  question: 'question',
+  bookmark: 'bookmark',
+};
+
 export function Scrubber({
   durationSec,
   playheadRef,
@@ -58,6 +66,7 @@ export function Scrubber({
   onCommit,
   onFrame,
   ticks,
+  onTickSeek,
   className,
 }: {
   /** 0 when the duration is not known yet — the track renders inert rather than lying. */
@@ -79,6 +88,8 @@ export function Scrubber({
    */
   onFrame?: ((positionSec: number) => void) | undefined;
   ticks?: readonly ScrubberTick[] | undefined;
+  /** §3.6 S4: clicking a tick seeks the whole room, permission-checked upstream. */
+  onTickSeek?: ((positionSec: number) => void) | undefined;
   className?: string | undefined;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -347,19 +358,39 @@ export function Scrubber({
           />
         </div>
 
-        {/* Phase 7's note and question marks. Empty today, and drawn from the
-            same coordinate space as the handle so they cannot disagree with it. */}
-        {(ticks ?? []).map((tick) =>
-          durationSec > 0 ? (
-            <span
-              key={tick.id}
-              title={tick.label}
-              aria-hidden="true"
-              className="pointer-events-none absolute top-1/2 h-2.5 w-0.5 -translate-y-1/2 rounded-sm bg-secondary"
-              style={{ left: `${clamp(tick.atSec / durationSec, 0, 1) * 100}%` }}
-            />
-          ) : null,
-        )}
+        {/* Note, question and bookmark marks (§3.6 S3, S4). Drawn from the same
+            coordinate space as the handle so the two cannot disagree, and a
+            real <button> so they are reachable by keyboard — a tick you can
+            only hit with a mouse is a feature half the room cannot use.
+
+            `stopPropagation` matters: the track's own pointerdown starts a
+            scrub, and without it clicking a tick would seek twice, once to the
+            tick and once to wherever the pointer happened to be. */}
+        {durationSec > 0 && onTickSeek !== undefined
+          ? (ticks ?? []).map((tick) => (
+              <button
+                key={tick.id}
+                type="button"
+                title={`${TICK_NOUN[tick.kind]} at ${formatTimestamp(tick.atSec)} — ${tick.label}`}
+                aria-label={`Jump to ${TICK_NOUN[tick.kind]} at ${formatTimestamp(tick.atSec)}`}
+                disabled={disabled}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onTickSeek(tick.atSec);
+                }}
+                className={cn(
+                  'absolute top-1/2 h-2.5 w-1 -translate-y-1/2 -translate-x-1/2 rounded-sm',
+                  'transition-colors duration-120 ease-standard',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+                  'disabled:pointer-events-none',
+                  tick.kind === 'question' ? 'bg-accent' : 'bg-secondary',
+                  'hover:h-3.5 hover:bg-primary',
+                )}
+                style={{ left: `${clamp(tick.atSec / durationSec, 0, 1) * 100}%` }}
+              />
+            ))
+          : null}
 
         {interactive ? (
           <div

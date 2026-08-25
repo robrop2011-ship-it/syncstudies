@@ -1,6 +1,28 @@
+import path from 'node:path';
 import type { NextConfig } from 'next';
 
 const isDev = process.env.NODE_ENV === 'development';
+
+/**
+ * The realtime service's origin, so `connect-src` can name it instead of
+ * allowing every `ws:`/`wss:` host on the internet (§11.6).
+ *
+ * Both schemes are listed because the socket URL is http(s) in configuration and
+ * the browser upgrades it: allowing only `wss://rt.example` would block the
+ * handshake's initial HTTP request, and allowing only `https://` would block the
+ * upgrade.
+ */
+const realtimeOrigins = (() => {
+  const raw = process.env.NEXT_PUBLIC_REALTIME_URL;
+  if (!raw) return [];
+  try {
+    const url = new URL(raw);
+    const ws = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return [url.origin, `${ws}//${url.host}`];
+  } catch {
+    throw new Error(`NEXT_PUBLIC_REALTIME_URL is not a valid URL: ${raw}`);
+  }
+})();
 
 /**
  * Avatars live on their own origin (R2 / a CDN domain). Parsed once here so a
@@ -52,8 +74,10 @@ const csp: Record<string, string[]> = {
   // that origin has to be allowed here or every uploaded avatar is silently
   // blocked and falls back to the generated initial.
   'img-src': ["'self'", 'data:', 'https://i.ytimg.com', ...(avatarOrigin ? [avatarOrigin] : [])],
-  // The realtime service is reached over ws/wss; REST is same-origin.
-  'connect-src': ["'self'", 'ws:', 'wss:'],
+  // The realtime service is named explicitly; REST is same-origin. In dev the
+  // Next.js HMR socket also needs `ws:` on localhost, and that is the only
+  // reason the wildcard survives at all — it is gone in a production build.
+  'connect-src': ["'self'", ...realtimeOrigins, ...(isDev ? ['ws:', 'wss:'] : [])],
   'media-src': ["'self'", 'blob:'],
   'worker-src': ["'self'", 'blob:'],
   'object-src': ["'none'"],
@@ -101,6 +125,21 @@ const nextConfig: NextConfig = {
   },
 
 
+  /**
+   * Prisma's query engine and schema are loaded at runtime by path, not by an
+   * import Next can follow, so its file tracer does not know to bundle them.
+   * Without this the deploy succeeds and the first database call fails with
+   * "Query engine library for current platform could not be found".
+   *
+   * The glob reaches out of `apps/web` because pnpm keeps the real files in the
+   * workspace root's store rather than under this app's node_modules.
+   */
+  outputFileTracingRoot: path.join(process.cwd(), '../../'),
+  outputFileTracingIncludes: {
+    '/api/**/*': ['../../node_modules/.pnpm/@prisma+client*/**/*', '../../packages/db/prisma/**/*'],
+    '/**/*': ['../../node_modules/.pnpm/@prisma+client*/**/*', '../../packages/db/prisma/**/*'],
+  },
+
   eslint: { dirs: ['app', 'components', 'lib'] },
 
   async headers() {
@@ -111,6 +150,18 @@ const nextConfig: NextConfig = {
           { key: 'Content-Security-Policy', value: cspHeader },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
+          // §14 Phase 9.2. Only in production: sending HSTS from a dev server
+          // pins `localhost` to https in the browser for two years, and every
+          // other localhost project on that machine then breaks in a way that
+          // takes an afternoon to diagnose.
+          ...(isDev
+            ? []
+            : [
+                {
+                  key: 'Strict-Transport-Security',
+                  value: 'max-age=63072000; includeSubDomains; preload',
+                },
+              ]),
           {
             key: 'Permissions-Policy',
             // The three the product actually uses stay self-scoped; the rest are off.

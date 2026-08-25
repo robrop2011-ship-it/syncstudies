@@ -34,6 +34,8 @@ import type { LeaderElection } from '../rooms/leader.js';
 import type { RoomTicker } from '../rooms/snapshotter.js';
 import type { RoomBus } from '../rooms/bus.js';
 import { LIMITS, type RateRule, type TokenBucket } from '../ratelimit/tokenBucket.js';
+import type { ChatService } from '../chat/service.js';
+import type { NotesService } from '../notes/service.js';
 import { handlerErrorsTotal, observeEventLatency } from '../metrics.js';
 
 /** Socket.IO's third generic is for inter-server events, which we do not use. */
@@ -72,6 +74,10 @@ export interface AppContext {
   ticker: RoomTicker;
   limiter: TokenBucket;
   bus: RoomBus;
+  /** Owns the transcript: user sends, system lines, and the write-behind queue. */
+  chat: ChatService;
+  /** Owns the shared document: the live block store and its debounced persistence. */
+  notes: NotesService;
   log: Logger;
   config: Config;
   /** Set during wiring; presence.ts owns the timers, room.ts and host.ts use them. */

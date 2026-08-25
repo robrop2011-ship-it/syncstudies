@@ -1,6 +1,13 @@
+/**
+ * Relative imports in this package carry NO file extension (ADR 0002).
+ * `./messages.js` typechecks and then fails in Turbopack, which is the one
+ * toolchain that has no escape hatch. Do not "fix" this back.
+ */
 import { PrismaClient } from '@prisma/client';
 
 export * from '@prisma/client';
+export * from './messages';
+export * from './notes';
 
 /**
  * Single Prisma instance per process.

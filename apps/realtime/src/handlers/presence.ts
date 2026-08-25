@@ -26,6 +26,7 @@ import {
   type GraceScheduler,
   type TypedSocket,
 } from './context.js';
+import { leaveCall } from './rtc.js';
 import { participantsPerRoom } from '../metrics.js';
 
 export type LeaveReason = 'left' | 'timeout' | 'kicked';
@@ -60,6 +61,11 @@ export async function removeParticipantAndBroadcast(
   reason: LeaveReason,
 ): Promise<void> {
   const entry = await ctx.store.getParticipant(roomId, userId);
+  // Before the presence row goes: peers holding an RTCPeerConnection to this
+  // person need `rtc:peer_left`, and any screenshare lock they hold has to come
+  // back. Announcing the presence patch would be noise — `presence:leave` is
+  // one event later and says strictly more.
+  await leaveCall(ctx, roomId, userId, { announce: false });
   const removed = await ctx.store.deleteParticipant(roomId, userId);
   if (!removed) return;
 
@@ -67,6 +73,14 @@ export async function removeParticipantAndBroadcast(
   await ctx.store.markBuffering(roomId, userId, false);
   ctx.io.to(roomChannel(roomId)).emit('presence:leave', { userId, reason });
   void recordLeave(roomId, userId);
+
+  // A transcript line, throttled by subject so a flapping connection writes one
+  // "Sam left", not twelve (§14 Phase 5.7). A kick is deliberately silent here:
+  // announcing a removal to the room is a moderation decision, not a side effect
+  // of one, and the person kicked is already being told directly.
+  if (entry && reason !== 'kicked') {
+    ctx.chat.system(roomId, `leave:${userId}`, `${entry.displayName} left`);
+  }
 
   const remaining = await ctx.store.listParticipants(roomId);
   participantsPerRoom.observe(remaining.length);
@@ -135,6 +149,7 @@ export async function promoteNewHost(
 
   ctx.io.to(roomChannel(roomId)).emit('room:host_changed', { hostId: next.userId, reason });
   broadcastPresencePatch(ctx, roomId, next.userId, { role: 'host' });
+  ctx.chat.system(roomId, `host:${next.userId}`, `${next.displayName} is now the host`);
   void logRoomEvent(roomId, previousHostId, 'host_changed', { to: next.userId, reason }, ctx.log);
 
   ctx.log.info({ roomId, userId: next.userId, reason }, 'host transferred');

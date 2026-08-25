@@ -11,7 +11,6 @@
  *    prevention (§11.9) and handing them back would be handing back a stable
  *    identifier for the user's network, which serves nobody.
  */
-import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 import { prisma } from '@syncstudy/db';
 import { apiHandler, fail } from '@/lib/server/respond';
@@ -25,9 +24,10 @@ export const dynamic = 'force-dynamic';
 /** A ceiling so one very chatty account cannot ask us to buffer 400 MB of JSON. */
 const MAX_ROWS = 5_000;
 
-// `_req` is unused: the export is entirely driven by the session. TypeScript's
-// noUnusedParameters exempts the leading underscore.
-export const GET = apiHandler(async (_req: NextRequest) => {
+// The request object is unused: the export is entirely driven by the session.
+// eslint's no-unused-vars does not honour the leading underscore here, and a
+// silent warning in CI is a warning nobody reads, so the parameter is dropped.
+export const GET = apiHandler(async () => {
   const { session } = await requireApiSession();
   const limited = limitOr429('me:export:user', session.user.id);
   if (limited !== null) return limited;

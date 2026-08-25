@@ -17,7 +17,7 @@ import { Callout } from '@/components/ui/callout';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/app/textarea';
+import { Textarea } from '@/components/ui/textarea';
 import { api, fieldsOf, messageOf } from '@/lib/api';
 
 export interface ProfileFormProps {

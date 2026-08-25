@@ -8,15 +8,14 @@
  * as a bordered ghost rather than a red fill, because a red button beside a
  * video invites exactly the misclick it looks like it is warning about.
  *
- * Mic, camera and screen share are inert: WebRTC is Phase 6. They are rendered
- * disabled with the reason stated in text as well as in a tooltip, so the
- * explanation does not depend on owning a mouse.
+ * Mic, camera and screen share come from `CallControls`, which owns the call's
+ * own state; this file owns the frame and the leave-the-room flow.
  *
  * Leave works, and for a host it opens the §2.4 hand-over dialog first.
  */
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { LogOut, Mic, MonitorUp, Video, type LucideIcon } from 'lucide-react';
+import { LogOut } from 'lucide-react';
 import type { Participant } from '@syncstudy/shared';
 import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -28,13 +27,12 @@ import {
   DialogFooter,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useMyPermissions, useParticipants } from '@/lib/stores/room-store';
 import { useSocket } from '@/lib/socket/provider';
 import { ackWithTimeout } from '@/components/room/socket-ack';
+import { CallControls } from '@/components/room/call/CallControls';
+import { AddNoteButton } from '@/components/room/notes/AddNoteDialog';
 import { cn } from '@/lib/utils';
-
-const PHASE_6 = 'arrives in Phase 6';
 
 export function ControlBar({
   youId,
@@ -101,13 +99,11 @@ export function ControlBar({
           className,
         )}
       >
-        <InertControl icon={Mic} label="Microphone" note={`Voice ${PHASE_6}`} />
-        <InertControl icon={Video} label="Camera" note={`Video ${PHASE_6}`} />
-        <InertControl icon={MonitorUp} label="Share screen" note={`Screen sharing ${PHASE_6}`} />
+        <CallControls youId={youId} />
 
-        <p className="ml-2 hidden text-13 text-tertiary xl:block">
-          Voice, camera and screen sharing arrive in Phase 6.
-        </p>
+        {/* §2.5's retention feature earns a place in the bar as well as the `?`
+            hotkey: a shortcut nobody discovers is a feature nobody uses. */}
+        <AddNoteButton className="ml-1" />
 
         <div className="flex-1" />
 
@@ -218,48 +214,6 @@ export function ControlBar({
         </DialogContent>
       </Dialog>
     </>
-  );
-}
-
-/**
- * A control that exists in the layout but not yet in the product.
- *
- * The tooltip hangs on the wrapper rather than the button: a `disabled` button
- * receives no pointer events, so a tooltip attached to it never opens. The
- * reason is also written in the bar itself, because a tooltip is not an
- * explanation anyone on a phone will ever see.
- */
-function InertControl({
-  icon: Icon,
-  label,
-  note,
-}: {
-  icon: LucideIcon;
-  label: string;
-  note: string;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex">
-          <button
-            type="button"
-            disabled
-            aria-label={`${label} — ${note}`}
-            className={cn(
-              // 44px touch target on small screens (§12.6), tighter on desktop.
-              'inline-flex h-11 w-11 items-center justify-center rounded-md border border-border-strong lg:h-9 lg:w-9',
-              'text-tertiary opacity-50',
-            )}
-          >
-            <Icon size={16} strokeWidth={1.5} aria-hidden="true" />
-          </button>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>
-        {label} — {note}
-      </TooltipContent>
-    </Tooltip>
   );
 }
 

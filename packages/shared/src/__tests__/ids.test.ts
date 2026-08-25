@@ -18,6 +18,7 @@ import {
   normalizeRoomCode,
   randomCode,
   uuidv7,
+  uuidv7At,
   uuidv7Time,
 } from '../ids';
 
@@ -192,9 +193,12 @@ describe('uuidv7', () => {
     }
   });
 
+  // `uuidv7At` rather than `uuidv7`: the latter is monotonic per process and
+  // therefore cannot embed a timestamp that would move an id backwards, which
+  // is exactly the guarantee ADR 0007 needs. The pure form keeps this property.
   it('embeds the timestamp so uuidv7Time recovers it exactly', () => {
     for (const ms of [0, 1, 1_700_000_000_000, Date.now(), 2 ** 40 + 12_345]) {
-      expect(uuidv7Time(uuidv7(ms))).toBe(ms);
+      expect(uuidv7Time(uuidv7At(ms))).toBe(ms);
     }
   });
 
@@ -232,5 +236,48 @@ describe('clientId', () => {
       expect(id).toMatch(/^[a-z0-9]{16}$/);
     }
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+/**
+ * Monotonicity within a millisecond (RFC 9562 §6.2).
+ *
+ * ADR 0007 orders the chat transcript by `id` and nothing else, so "later id
+ * means later message" has to hold for two messages sent in the same
+ * millisecond — not just for two sent in different ones.
+ */
+describe('uuidv7 monotonicity', () => {
+  it('is strictly increasing across a tight burst', () => {
+    const ids = Array.from({ length: 500 }, () => uuidv7());
+    expect([...ids].sort()).toEqual(ids);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('is strictly increasing when the clock is pinned to one millisecond', () => {
+    const ids = Array.from({ length: 200 }, () => uuidv7(1_700_000_000_000));
+    expect([...ids].sort()).toEqual(ids);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('does not go backwards when the clock steps back', () => {
+    const forward = uuidv7(1_700_000_100_000);
+    const backward = uuidv7(1_700_000_000_000);
+    expect(backward > forward).toBe(true);
+  });
+
+  it('embeds a timestamp later than every id issued so far', () => {
+    const at = Date.now() + 60_000;
+    expect(uuidv7Time(uuidv7(at))).toBe(at);
+  });
+
+  it('uuidv7At is pure — it honours any timestamp and keeps no state', () => {
+    expect(uuidv7Time(uuidv7At(1_700_000_200_000))).toBe(1_700_000_200_000);
+    expect(uuidv7At(1_000)).not.toBe(uuidv7At(1_000));
+  });
+
+  it('keeps the version and variant nibbles', () => {
+    const id = uuidv7(1_700_000_300_000);
+    expect(id[14]).toBe('7');
+    expect('89ab').toContain(id[19]);
   });
 });

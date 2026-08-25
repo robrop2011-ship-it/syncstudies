@@ -19,7 +19,7 @@
  * That matters because the alternative — rendering the control bar twice and
  * hiding one — puts two of every button in the accessibility tree.
  */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { canControlVideo, type Role } from '@syncstudy/shared';
 import { RoomSocketProvider } from '@/lib/socket/provider';
@@ -30,6 +30,7 @@ import {
   useParticipants,
   useRoomMeta,
   useRoomNotice,
+  useNoteItems,
   useRoomPolicy,
   useRoomStore,
 } from '@/lib/stores/room-store';
@@ -40,7 +41,16 @@ import { RoomOverflowMenu } from '@/components/room/HostControls';
 import { PlayerControls } from '@/components/room/PlayerControls';
 import { RoomSidebar } from '@/components/room/RoomSidebar';
 import { RoomTopBar } from '@/components/room/RoomTopBar';
+import { RoomShortcuts } from '@/components/room/ShortcutSheet';
+import { Onboarding } from '@/components/room/Onboarding';
+import { FeedbackDialog } from '@/components/room/FeedbackDialog';
 import { VideoStage } from '@/components/room/VideoStage';
+import { CallProvider } from '@/lib/call/provider';
+import { CallAudio } from '@/components/room/call/CallAudio';
+import { CallTiles } from '@/components/room/call/CallTiles';
+import { ScreenShareStage, useActiveShare } from '@/components/room/call/ScreenShareStage';
+import { useSyncController } from '@/lib/sync/useSyncController';
+import type { ScrubberTick } from '@/components/room/Scrubber';
 import type { RoomBootstrap, RoomClosedKind } from '@/components/room/types';
 
 /**
@@ -67,7 +77,24 @@ export function RoomShell({
   // the next one on a client-side navigation.
   return (
     <RoomSocketProvider roomCode={roomCode}>
-      <RoomFrame bootstrap={bootstrap} />
+      {/* Mounted for the whole room, but it creates nothing until someone
+          presses "Join voice" — the WebRTC layer is a dynamic import inside
+          `join()`, so it is absent from the room's first-load bundle (§14
+          Phase 8.7). */}
+      <CallProvider
+        selfUserId={bootstrap.viewer.id}
+        preferences={{
+          joinMuted: bootstrap.prefs.joinMuted,
+          pushToTalk: bootstrap.prefs.pushToTalk,
+          hideIpFromPeers: bootstrap.prefs.hideIpFromPeers,
+        }}
+      >
+        <RoomFrame bootstrap={bootstrap} />
+        <CallAudio />
+        <RoomShortcuts />
+        <Onboarding isHost={bootstrap.isHost} />
+        <FeedbackDialog roomId={bootstrap.roomId} />
+      </CallProvider>
     </RoomSocketProvider>
   );
 }
@@ -106,6 +133,32 @@ function RoomFrame({ bootstrap }: { bootstrap: RoomBootstrap }) {
     participants.find((participant) => participant.id === hostId)?.displayName ??
     bootstrap.hostName;
 
+  // §3.6 S3/S4: the same items feed the scrubber ticks and the Notes panel, so
+  // the two cannot disagree about where a question was asked.
+  const noteItems = useNoteItems();
+  const controller = useSyncController();
+  const ticks = useMemo<ScrubberTick[]>(
+    () =>
+      noteItems
+        .filter((item) => item.videoTs !== null)
+        .map((item) => ({
+          id: item.id,
+          atSec: item.videoTs ?? 0,
+          label: item.body,
+          kind: item.kind,
+        })),
+    [noteItems],
+  );
+  // Seeking from a tick goes through the same permission-checked path as the
+  // scrubber. There is no second seek path to keep in step.
+  const seekRoom = useCallback(
+    (positionSec: number) => {
+      if (!canControl) return;
+      void controller?.commitSeek(positionSec);
+    },
+    [controller, canControl],
+  );
+
   const terminal = joinError === null ? undefined : TERMINAL[joinError.code];
   if (terminal !== undefined) {
     return <RoomClosedScreen kind={terminal} roomName={name} code={bootstrap.code} />;
@@ -120,6 +173,9 @@ function RoomFrame({ bootstrap }: { bootstrap: RoomBootstrap }) {
     <div className="flex h-dvh flex-col overflow-hidden bg-bg text-primary">
       <ConnectionBar
         status={connection.status}
+        // `meta` is non-null only once a snapshot has landed, which is exactly
+        // "we were in this room at some point on this mount".
+        everConnected={meta !== null}
         onRetry={() => {
           window.location.reload();
         }}
@@ -157,15 +213,16 @@ function RoomFrame({ bootstrap }: { bootstrap: RoomBootstrap }) {
               a fixed ratio: with no player in it, a strict 16:9 box on a 375px
               phone is 211px tall and clips its own empty state. The iframe fills
               the width and lands on the ratio anyway. */}
-          <VideoStage
-            canSetVideo={canSetVideo}
-            loading={loading}
-            className="min-h-[56.25vw] w-full md:min-h-0 md:flex-1"
-          />
+          {/* §12.4: cameras live in a row above the video, capped at four and
+              rendered only when somebody actually has one on. */}
+          <CallTiles youId={bootstrap.viewer.id} />
+          <StageArea canSetVideo={canSetVideo} loading={loading} />
           <PlayerControls
             canControl={canControl}
             playbackControl={playbackControl}
             hostName={hostName}
+            ticks={ticks}
+            onTickSeek={seekRoom}
           />
         </div>
 
@@ -173,6 +230,8 @@ function RoomFrame({ bootstrap }: { bootstrap: RoomBootstrap }) {
           youId={bootstrap.viewer.id}
           hostId={hostId}
           loading={loading}
+          canSeek={canControl}
+          onSeek={seekRoom}
           className="col-start-1 row-start-2 border-t border-border lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:border-l lg:border-t-0"
         />
 
@@ -201,4 +260,34 @@ function useServerNoticeToasts(): void {
     else toast(notice.message);
     clearNotice();
   }, [notice, clearNotice]);
+}
+
+
+/**
+ * The video area, and what happens to it when somebody shares a screen (§9.6).
+ *
+ * The player element is never re-parented — only its class changes — because
+ * moving an iframe in the DOM reloads it, and a reload here means losing the
+ * player, the buffer and the sync state to a cosmetic layout change. While a
+ * share is up the lecture keeps playing in the corner: sync continues, the
+ * audio ducks, and stopping the share puts it straight back.
+ */
+function StageArea({ canSetVideo, loading }: { canSetVideo: boolean; loading: boolean }) {
+  const share = useActiveShare();
+
+  return (
+    <div className="relative flex min-h-[56.25vw] w-full min-w-0 flex-col md:min-h-0 md:flex-1">
+      {share === null ? null : <ScreenShareStage share={share} />}
+      <VideoStage
+        canSetVideo={canSetVideo}
+        loading={loading}
+        className={
+          share === null
+            ? 'min-h-[56.25vw] w-full md:min-h-0 md:flex-1'
+            : // 16:9 at 40% width, clear of the share's own caption bar.
+              'absolute bottom-12 right-3 z-10 w-40 rounded-md border border-border-strong shadow-dropdown sm:w-56 lg:w-64'
+        }
+      />
+    </div>
+  );
 }

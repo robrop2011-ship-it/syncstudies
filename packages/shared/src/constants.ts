@@ -91,6 +91,16 @@ export const ROOM_PARTICIPANTS_FLOOR = 2;
 export const ROOM_PARTICIPANTS_CEILING = 25;
 export const MESSAGE_PAGE_SIZE = 50;
 export const INITIAL_MESSAGE_COUNT = 50;
+/**
+ * Ceiling on a reconnect backfill (§8.8).
+ *
+ * A client that was away for two minutes gets everything it missed. A client
+ * that was away for an hour in a busy room gets the newest 200 and fills the
+ * rest by scrolling, which is what the pagination endpoint is for. Shared,
+ * because the client has to recognise a page of exactly this size as "there is
+ * a gap behind this" rather than "this is the whole story".
+ */
+export const MESSAGE_BACKFILL_MAX = 200;
 
 // ── Accounts (PLAN.md Amendment A1) ─────────────────────────────────────────
 export const MIN_PASSWORD_LENGTH = 10;

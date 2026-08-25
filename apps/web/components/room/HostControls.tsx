@@ -21,7 +21,18 @@
  */
 import { useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Ban, Check, MoreHorizontal, ShieldMinus, ShieldPlus, UserMinus, Crown, PowerOff } from 'lucide-react';
+import {
+  Ban,
+  Check,
+  Crown,
+  Keyboard,
+  LifeBuoy,
+  MoreHorizontal,
+  PowerOff,
+  ShieldMinus,
+  ShieldPlus,
+  UserMinus,
+} from 'lucide-react';
 import {
   can,
   canActOn,
@@ -50,6 +61,8 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useSocket } from '@/lib/socket/provider';
 import { NO_SOCKET, ackWithTimeout } from '@/components/room/socket-ack';
+import { showShortcuts } from '@/components/room/ShortcutSheet';
+import { showFeedback } from '@/components/room/FeedbackDialog';
 import { cn } from '@/lib/utils';
 
 // ── per-participant menu ────────────────────────────────────────────────────
@@ -296,7 +309,9 @@ export function RoomOverflowMenu({
 
   const mayPolicy = can(myRole, 'host.policy');
   const mayEnd = can(myRole, 'host.end');
-  if (!mayPolicy && !mayEnd) return null;
+  // The menu renders for everyone now: the shortcut sheet lives in it, and a
+  // member with no way to find the keyboard shortcuts is a member who never
+  // learns there are any. Host items stay conditional.
 
   function setPolicy(next: PlaybackControlPolicy): void {
     if (next === playbackControl) return;
@@ -359,6 +374,28 @@ export function RoomOverflowMenu({
             }
           }}
         >
+          <DropdownMenuItem
+            onSelect={() => {
+              openingDialog.current = true;
+              showShortcuts();
+            }}
+          >
+            <Keyboard size={16} strokeWidth={1.5} aria-hidden="true" />
+            Keyboard shortcuts
+          </DropdownMenuItem>
+
+          <DropdownMenuItem
+            onSelect={() => {
+              openingDialog.current = true;
+              showFeedback();
+            }}
+          >
+            <LifeBuoy size={16} strokeWidth={1.5} aria-hidden="true" />
+            Something wrong?
+          </DropdownMenuItem>
+
+          {mayPolicy || mayEnd ? <DropdownMenuSeparator /> : null}
+
           {mayPolicy ? (
             <>
               <DropdownMenuLabel>Who can control playback</DropdownMenuLabel>

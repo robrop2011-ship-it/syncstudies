@@ -31,6 +31,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { useWaitingForNames } from '@/lib/stores/room-store';
 import type { SyncController } from '@/lib/sync/controller';
 import type { SyncStatus as SyncStatusValue } from '@/lib/sync/types';
 import { cn } from '@/lib/utils';
@@ -55,12 +56,38 @@ interface Descriptor {
 }
 
 /**
- * One state wins, and the order matters: what the user asked for beats what we
- * measured, a failing connection beats a transient correction, and "correcting"
- * beats "in sync" even though most ticks land in the dead zone.
+ * "Sam", "Sam and Priya", "3 people". Past two names a list stops being
+ * information and starts being a wall, and the pill is one line wide.
  */
-function describe(status: SyncStatusValue): Descriptor | null {
-  if (status.drift === 'idle' && !status.autoSyncPaused) return null;
+function nameList(names: string[]): string {
+  const [first, second] = names;
+  if (first === undefined) return 'someone';
+  if (second === undefined) return first;
+  if (names.length === 2) return `${first} and ${second}`;
+  return `${names.length} people`;
+}
+
+/**
+ * One state wins, and the order matters: a room-wide stop beats anything local,
+ * then what the user asked for beats what we measured, a failing connection
+ * beats a transient correction, and "correcting" beats "in sync" even though
+ * most ticks land in the dead zone.
+ */
+function describe(status: SyncStatusValue, waitingFor: string[]): Descriptor | null {
+  if (status.drift === 'idle' && !status.autoSyncPaused && waitingFor.length === 0) return null;
+
+  // §8.10. The room is paused for everyone and the video stopped on its own —
+  // that needs a reason attached to it far more than a drift reading does, and
+  // it outranks even "auto-sync off" because it is not about this client at all.
+  if (waitingFor.length > 0) {
+    const who = nameList(waitingFor);
+    return {
+      label: `Waiting for ${who}`,
+      spoken: `Paused — waiting for ${who} to catch up.`,
+      dot: 'bg-warning',
+      text: 'text-warning',
+    };
+  }
 
   if (status.autoSyncPaused) {
     return {
@@ -121,7 +148,8 @@ export function SyncStatus({
   controller: SyncController | null;
   className?: string | undefined;
 }) {
-  const descriptor = describe(status);
+  const waitingFor = useWaitingForNames();
+  const descriptor = describe(status, waitingFor);
   if (descriptor === null) return null;
 
   const pill = (

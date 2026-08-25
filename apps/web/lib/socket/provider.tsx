@@ -24,6 +24,7 @@ import {
   CLOCK_SAMPLES_RESYNC,
   CLOCK_SAMPLE_SPACING_MS,
   ROOM_HEARTBEAT_MS,
+  WAIT_FOR_SLOW_MAX_MS,
 } from '@syncstudy/shared';
 import { createSocket, realtimeUrl, type TypedClientSocket } from '@/lib/socket/client';
 import { ServerClock, ServerClockContext } from '@/lib/sync/clock';
@@ -146,6 +147,8 @@ export function RoomSocketProvider({
 
     /** Set by the cleanup: no store write may outlive the mount that caused it. */
     let disposed = false;
+    /** Local backstop for the §8.10 wait label; see the `video:waiting` handler. */
+    let waitTimer = 0;
     /** Set by anything that means "we are not coming back": kicked, banned, ended. */
     let terminal = false;
     /** Have we completed a join on this socket? Decides `room:join` vs `room:resync`. */
@@ -183,40 +186,65 @@ export function RoomSocketProvider({
      * store on every tick, so telling it about an anchor the store has not
      * accepted yet would have it converge on the previous one.
      */
-    const applySnapshot = (snapshot: Parameters<RoomStoreState['applySnapshot']>[0]): void => {
-      state().applySnapshot(snapshot);
+    const applySnapshot = (
+      snapshot: Parameters<RoomStoreState['applySnapshot']>[0],
+      backfilled = false,
+    ): void => {
+      state().applySnapshot(snapshot, { backfilled });
       // §8.7 / §8.8: a snapshot is a join, a late join, or a reconnect. All three
       // want the player put where the anchor says without measuring first.
       bridge.controller?.applyAnchor(snapshot.video, 'snapshot');
     };
 
+    /**
+     * The newest message the server has confirmed to us.
+     *
+     * Sent with a rejoin so the snapshot backfills what was missed instead of
+     * handing back the newest page and leaving a hole. Pending sends are skipped
+     * on purpose — their ids are local, and the server would have nothing to
+     * compare them against.
+     */
+    const lastServerMessageId = (): string | undefined => {
+      const messages = state().messages;
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i];
+        if (message !== undefined && message.delivery === 'sent') return message.id;
+      }
+      return undefined;
+    };
+
     const join = (): void => {
       joinAttempts += 1;
-      activeSocket.emit('room:join', { roomCode }, (ack) => {
-        if (disposed || terminal) return;
+      const cursor = lastServerMessageId();
+      activeSocket.emit(
+        'room:join',
+        { roomCode, ...(cursor === undefined ? {} : { lastMessageId: cursor }) },
+        (ack) => {
+          if (disposed || terminal) return;
 
-        if (ack.ok && ack.snapshot !== undefined) {
-          joinedOnce = true;
-          joinAttempts = 0;
-          // §8.7 step 2: the snapshot rides on the ack, so there is one payload
-          // and one place that applies it.
-          applySnapshot(ack.snapshot);
-          return;
-        }
+          if (ack.ok && ack.snapshot !== undefined) {
+            joinedOnce = true;
+            joinAttempts = 0;
+            // §8.7 step 2: the snapshot rides on the ack, so there is one payload
+            // and one place that applies it.
+            applySnapshot(ack.snapshot, cursor !== undefined);
+            return;
+          }
 
-        const code = ack.code ?? 'join_failed';
-        const message = ack.message ?? 'Could not join this room.';
-        if (RETRYABLE_JOIN_CODES.has(code) && joinAttempts < MAX_JOIN_ATTEMPTS) {
-          state().setJoinError({ code, message });
-          retryTimer = setTimeout(() => {
-            retryTimer = null;
-            if (disposed || terminal || !activeSocket.connected) return;
-            join();
-          }, JOIN_RETRY_DELAY_MS * joinAttempts);
-          return;
-        }
-        endSession({ code, message });
-      });
+          const code = ack.code ?? 'join_failed';
+          const message = ack.message ?? 'Could not join this room.';
+          if (RETRYABLE_JOIN_CODES.has(code) && joinAttempts < MAX_JOIN_ATTEMPTS) {
+            state().setJoinError({ code, message });
+            retryTimer = setTimeout(() => {
+              retryTimer = null;
+              if (disposed || terminal || !activeSocket.connected) return;
+              join();
+            }, JOIN_RETRY_DELAY_MS * joinAttempts);
+            return;
+          }
+          endSession({ code, message });
+        },
+      );
     };
 
     /**
@@ -244,10 +272,20 @@ export function RoomSocketProvider({
       const away = hiddenSinceMono === null ? 0 : performance.now() - hiddenSinceMono;
       hiddenSinceMono = null;
       if (!joinedOnce || !activeSocket.connected || away < ROOM_HEARTBEAT_MS) return;
-      activeSocket.emit('room:resync', { lastRevision: state().video.revision }, (ack) => {
-        if (disposed || terminal) return;
-        if (ack.ok && ack.snapshot !== undefined) applySnapshot(ack.snapshot);
-      });
+      const cursor = lastServerMessageId();
+      activeSocket.emit(
+        'room:resync',
+        {
+          lastRevision: state().video.revision,
+          ...(cursor === undefined ? {} : { lastMessageId: cursor }),
+        },
+        (ack) => {
+          if (disposed || terminal) return;
+          if (ack.ok && ack.snapshot !== undefined) {
+            applySnapshot(ack.snapshot, cursor !== undefined);
+          }
+        },
+      );
     };
 
     const onConnect = (): void => {
@@ -390,8 +428,7 @@ export function RoomSocketProvider({
       if (disposed) return;
       endSession({
         code: 'room_ended',
-        message:
-          reason === 'host_ended' ? 'The host ended this room.' : 'This room has ended.',
+        message: reason === 'host_ended' ? 'The host ended this room.' : 'This room has ended.',
       });
     });
     activeSocket.on('room:you_were_kicked', ({ banned }) => {
@@ -434,6 +471,78 @@ export function RoomSocketProvider({
       state().noteControlRejected(reason);
       bridge.controller?.applyAnchor(anchor, 'control');
     });
+    // §8.10. The server sends the clearing broadcast itself, so the timer is a
+    // backstop for the one case that broadcast cannot cover: the leader node
+    // dying mid-wait. Without it the label outlives the pause forever; with it
+    // the worst case is the label lasting exactly as long as the server's own
+    // cap. `untilServerMs` is server time, so it goes through the clock offset —
+    // a client whose wall clock is two seconds fast must not clear it early.
+    activeSocket.on('video:waiting', ({ waitingFor, untilServerMs }) => {
+      if (disposed) return;
+      window.clearTimeout(waitTimer);
+      if (waitingFor.length === 0) {
+        state().setWaiting(null);
+        return;
+      }
+      state().setWaiting({ userIds: waitingFor, untilServerMs });
+      const remainingMs = untilServerMs - activeClock.now();
+      waitTimer = window.setTimeout(
+        () => {
+          if (!disposed) state().setWaiting(null);
+        },
+        Math.max(0, Math.min(remainingMs, WAIT_FOR_SLOW_MAX_MS)),
+      );
+    });
+
+    // ── chat (§3.5) ─────────────────────────────────────────────────────────
+    // No filter for "this is my own message": the sender's optimistic copy is
+    // reconciled against this one by `clientMsgId`, so everyone in the room —
+    // including the author — ends up rendering the server's object.
+    activeSocket.on('chat:message', ({ message }) => {
+      if (disposed) return;
+      state().receiveMessages([message]);
+    });
+    activeSocket.on('chat:deleted', ({ messageId }) => {
+      if (disposed) return;
+      state().markMessageDeleted(messageId);
+    });
+
+    // ── study tools (§3.6, §8.12) ───────────────────────────────────────────
+    // Applied unconditionally, sender included: the server's copy carries the
+    // version and position this client cannot know, and its own optimistic copy
+    // is reconciled by block id.
+    activeSocket.on('notes:block_updated', ({ blockId, text, version, position }) => {
+      if (disposed) return;
+      state().applyBlockUpdate({ id: blockId, text, version, position });
+    });
+    activeSocket.on('notes:block_locked', ({ blockId, userId, untilServerMs }) => {
+      if (disposed) return;
+      state().setBlockLock(blockId, userId, untilServerMs);
+    });
+    activeSocket.on('notes:item_created', ({ item }) => {
+      if (disposed) return;
+      state().upsertNoteItem(item);
+    });
+    activeSocket.on('notes:item_updated', ({ item }) => {
+      if (disposed) return;
+      state().upsertNoteItem(item);
+    });
+    activeSocket.on('notes:item_deleted', ({ id }) => {
+      if (disposed) return;
+      state().removeNoteItem(id);
+    });
+    activeSocket.on('checklist:created', ({ item }) => {
+      if (disposed) return;
+      state().upsertChecklistItem(item);
+    });
+    activeSocket.on('checklist:updated', ({ item }) => {
+      if (disposed) return;
+      state().upsertChecklistItem(item);
+    });
+    activeSocket.on('checklist:deleted', ({ id }) => {
+      if (disposed) return;
+      state().removeChecklistItem(id);
+    });
 
     // ── system ──────────────────────────────────────────────────────────────
     activeSocket.on('sys:notice', (notice) => {
@@ -452,6 +561,7 @@ export function RoomSocketProvider({
     return () => {
       disposed = true;
       clearRetry();
+      window.clearTimeout(waitTimer);
       activeClock.stopSchedule();
       document.removeEventListener('visibilitychange', onVisibility);
       manager.off('reconnect_attempt', onReconnectAttempt);

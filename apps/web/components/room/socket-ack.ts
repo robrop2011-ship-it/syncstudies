@@ -22,11 +22,16 @@ export const NO_SOCKET: AckError = {
   message: 'Not connected to the room right now.',
 };
 
-export function ackWithTimeout(
-  run: (ack: (result: Ack) => void) => void,
+/**
+ * `T` is what the ack carries on success — `undefined` for the many events that
+ * only answer yes or no, `MessageView` for `chat:send`. Defaulting it keeps
+ * every existing call site unchanged.
+ */
+export function ackWithTimeout<T = undefined>(
+  run: (ack: (result: Ack<T>) => void) => void,
   timeoutMs: number = ACK_TIMEOUT_MS,
-): Promise<Ack> {
-  return new Promise<Ack>((resolve) => {
+): Promise<Ack<T>> {
+  return new Promise<Ack<T>>((resolve) => {
     let settled = false;
 
     const timer = setTimeout(() => {

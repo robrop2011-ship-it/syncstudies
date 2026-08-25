@@ -277,6 +277,9 @@ export class SyncController {
   // ── playhead smoothing ───────────────────────────────────────────────────
   private playheadSample: { position: number; atMono: number } | null = null;
   private lastPlayhead: number | null = null;
+  /** Null until the user (or the UI's initial read) has expressed a level. */
+  private userVolume: number | null = null;
+  private duckFactor = 1;
 
   private unsubscribes: (() => void)[] = [];
   private onVisibility: (() => void) | null = null;
@@ -667,12 +670,37 @@ export class SyncController {
     return this.player.isMuted();
   }
 
+  /**
+   * The volume the USER asked for, which is not always the volume the player is
+   * at: while someone in the call is speaking, `setDuck` scales it down (C5).
+   * Keeping the two apart means the slider does not walk down the screen every
+   * time a peer says something, and restoring is exact rather than approximate.
+   */
   setVolume(zeroToOne: number): void {
-    this.player.setVolume(clamp(zeroToOne, 0, 1));
+    this.userVolume = clamp(zeroToOne, 0, 1);
+    this.applyVolume();
   }
 
   getVolume(): number {
-    return this.player.getVolume();
+    return this.userVolume ?? this.player.getVolume();
+  }
+
+  /**
+   * Scale the room video's volume by `factor` without touching what the user
+   * chose (PLAN.md §9.4 C5 — duck to 35% while a peer speaks, restore after).
+   * The ramp is the caller's job; this is the setter it ramps.
+   */
+  setDuck(factor: number): void {
+    const next = clamp(factor, 0, 1);
+    if (Math.abs(next - this.duckFactor) < 0.005) return;
+    this.duckFactor = next;
+    this.applyVolume();
+  }
+
+  private applyVolume(): void {
+    const base = this.userVolume ?? this.player.getVolume();
+    if (!Number.isFinite(base)) return;
+    this.player.setVolume(clamp(base * this.duckFactor, 0, 1));
   }
 
   // ── the loop ─────────────────────────────────────────────────────────────
@@ -1232,6 +1260,47 @@ export class SyncController {
     while (this.hardSeekTimes.length > 0 && (this.hardSeekTimes[0] ?? 0) < cutoff) {
       this.hardSeekTimes.shift();
     }
+  }
+
+  /**
+   * The last 60 seconds of sync telemetry, for the "Something wrong?" report
+   * (§14 Phase 10.9).
+   *
+   * Read live rather than buffered separately: the drift loop already keeps a
+   * rolling window of samples for `flushTelemetry`, and a second buffer that
+   * could disagree with the first is exactly what a support report must not
+   * have. Safe to call at any time, including before a single sample exists.
+   */
+  getTelemetrySnapshot(): {
+    driftState: DriftState;
+    driftSec: number;
+    driftP50: number | null;
+    driftP95: number | null;
+    samples: number;
+    hardSeeksLastMinute: number;
+    clockOffsetMs: number;
+    quality: 'good' | 'poor';
+    buffering: boolean;
+    autoSyncPaused: boolean;
+    playerError: number | null;
+    seekLatencyMs: number;
+  } {
+    const sorted = [...this.driftSamples].sort((a, b) => a - b);
+    const status = this.getStatus();
+    return {
+      driftState: status.drift,
+      driftSec: status.driftSec,
+      driftP50: sorted.length === 0 ? null : Number(percentile(sorted, 0.5).toFixed(3)),
+      driftP95: sorted.length === 0 ? null : Number(percentile(sorted, 0.95).toFixed(3)),
+      samples: sorted.length,
+      hardSeeksLastMinute: status.hardSeeksLastMinute,
+      clockOffsetMs: Math.round(this.deps.clock.now() - Date.now()),
+      quality: status.quality,
+      buffering: status.buffering,
+      autoSyncPaused: status.autoSyncPaused,
+      playerError: status.error?.code ?? null,
+      seekLatencyMs: Math.round(this.seekLatency.seconds * 1000),
+    };
   }
 
   private flushTelemetry(): void {

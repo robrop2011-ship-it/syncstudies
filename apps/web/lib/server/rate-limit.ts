@@ -38,6 +38,7 @@ export interface RateLimitPolicy {
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 
 export const RATE_LIMITS = {
   'auth:signup:ip': {
@@ -99,6 +100,26 @@ export const RATE_LIMITS = {
     windowMs: HOUR,
     failClosed: false,
     message: 'You can export your data three times an hour.',
+  },
+  // §10.1: 10 reports/day/user. Fails closed — an unidentifiable reporter is
+  // not a reporter, and this table is a moderation queue a human has to read.
+  'reports:create:user': {
+    limit: 10,
+    windowMs: DAY,
+    failClosed: true,
+    message: 'You have filed a lot of reports today. Try again tomorrow.',
+  },
+  /**
+   * "Something wrong?" (§14 Phase 10.9). Generous, because a person having a
+   * genuinely bad session may legitimately send two or three in a row and being
+   * told to come back tomorrow would be insulting. Bounded, because it writes a
+   * row with a client-supplied payload in it.
+   */
+  'feedback:user': {
+    limit: 20,
+    windowMs: HOUR,
+    failClosed: true,
+    message: 'Thanks — that is plenty of feedback for now. Try again in a little while.',
   },
   'me:delete:user': {
     limit: 5,

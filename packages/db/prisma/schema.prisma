@@ -9,6 +9,16 @@
 
 generator client {
   provider = "prisma-client-js"
+  // `native` covers a developer machine. `rhel-openssl-3.0.x` is what Vercel's
+  // Node runtime (Amazon Linux 2023) needs, and `linux-musl-openssl-3.0.x` is
+  // the realtime service's Alpine image.
+  //
+  // Naming them is belt and braces: `prisma generate` runs inside each build,
+  // so `native` usually resolves to the right engine anyway. The failure it
+  // prevents is the one where a build image and a runtime image differ — which
+  // surfaces as "Query engine library for current platform could not be found"
+  // on the first request, long after the deploy reported success.
+  binaryTargets = ["native", "rhel-openssl-3.0.x", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {

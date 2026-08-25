@@ -40,11 +40,30 @@ const EnvSchema = z.object({
   /** coturn `static-auth-secret`. Absent in dev — calling then falls back to STUN only. */
   TURN_SECRET: z.string().min(1).optional(),
   TURN_URLS: Csv.optional(),
+  /**
+   * STUN is free, stateless, and enough for the ~85% of peer pairs that can
+   * reach each other directly. Google's is the default so a dev machine with no
+   * infrastructure still connects; a real deployment lists its own coturn first
+   * and keeps a public one behind it, never as the only entry (§9.3).
+   */
+  STUN_URLS: Csv.default('stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302'),
 
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 
   /** Identifies this process in leader leases and `sock:{id}` rows. */
   NODE_ID: z.string().min(1).default(`${hostname()}-${process.pid}`),
+
+  /**
+   * §11.4's per-IP connection cap. Twelve covers a household or a study group
+   * on one NAT with tabs to spare.
+   *
+   * It is configurable for exactly one reason: a load test drives every socket
+   * from 127.0.0.1, so the cap fires at thirteen and the run measures the cap
+   * rather than the server. Raising it in a *production* environment is how you
+   * let one machine open ten thousand sockets, so the default stays 12 and the
+   * override is something you have to type on purpose.
+   */
+  MAX_CONNECTIONS_PER_IP: z.coerce.number().int().min(1).max(100_000).default(12),
 });
 
 export type Config = z.infer<typeof EnvSchema> & { isProduction: boolean };

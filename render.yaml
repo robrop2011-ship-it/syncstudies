@@ -1,0 +1,55 @@
+# Render blueprint for the realtime service.
+#
+# Vercel cannot host it: it holds long-lived WebSockets and per-room state, and
+# a serverless function has neither. This is the smallest declarative way to put
+# it on a container host for a personal test. Fly.io (infra/fly.realtime.toml)
+# and Railway (point it at apps/realtime/Dockerfile, no config needed) are the
+# other two paths — see docs/VERCEL.md.
+#
+#   Render → New → Blueprint → point at this repo.
+#   Then set DATABASE_URL, REDIS_URL, IP_HASH_SALT and ALLOWED_ORIGINS.
+#
+# A note on the free plan: it spins the service down after ~15 minutes of
+# inactivity, which drops every socket in the room. That is survivable for a
+# personal test — clients reconnect and resync (§8.8) once it wakes — and is
+# exactly the wrong plan for real users. `plan: starter` is the first one that
+# stays up.
+
+services:
+  - type: web
+    name: syncstudy-realtime
+    runtime: docker
+    dockerfilePath: ./apps/realtime/Dockerfile
+    # The build context is the repo root: the service consumes the workspace
+    # packages as TypeScript source, so it needs them present.
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: LOG_LEVEL
+        value: info
+      # Set these in the dashboard. They are secrets, and `sync: false` is what
+      # stops Render trying to read a value out of this file.
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      # Must be at least 16 characters, and the SAME value the web app uses —
+      # different salts mean the two tiers hash the same address differently and
+      # the connection cap silently stops working.
+      - key: IP_HASH_SALT
+        sync: false
+      # The exact scheme and host of the Vercel deployment, comma separated. A
+      # trailing slash or a wrong scheme fails every handshake with `bad_origin`.
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # Optional: without these, calls are STUN-only and roughly 10-15% of peer
+      # pairs cannot connect (§9.3). Fine for a personal test on home Wi-Fi.
+      - key: TURN_SECRET
+        sync: false
+      - key: TURN_URLS
+        sync: false

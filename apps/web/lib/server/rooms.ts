@@ -416,6 +416,15 @@ export const ROOM_RATE_LIMITS = {
     failClosed: true,
     message: 'Too many room codes tried from this connection today.',
   },
+  // Scroll-up pagination. Generous — a reader dragging through a long transcript
+  // is a legitimate burst — but not unbounded, because each page is a database
+  // query against a table that grows without limit.
+  'rooms:messages:user': {
+    limit: 120,
+    windowMs: MINUTE,
+    failClosed: true,
+    message: 'Too many history requests. Wait a moment.',
+  },
   // §3.2 R3: 5 attempts / 10 min / IP + code.
   'rooms:passcode:ip-code': {
     limit: 5,

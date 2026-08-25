@@ -117,7 +117,17 @@ export const TimePong = z.object({ t0: z.number(), serverMs: z.number() });
 export type TimePong = z.infer<typeof TimePong>;
 
 // ── socket: room ────────────────────────────────────────────────────────────
-export const RoomJoin = z.object({ roomCode: RoomCode });
+export const RoomJoin = z.object({
+  roomCode: RoomCode,
+  /**
+   * The newest message this client already has, if any.
+   *
+   * A reconnect goes through `room:join`, not `room:resync` (socket.io builds a
+   * brand new server-side socket, so there is no room to resync into), which is
+   * why the backfill cursor has to be accepted on both.
+   */
+  lastMessageId: Uuid.optional(),
+});
 export type RoomJoin = z.infer<typeof RoomJoin>;
 
 export const RoomResync = z.object({

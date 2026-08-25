@@ -62,9 +62,20 @@ export function ConnectionStatusPill({ status }: { status: ConnectionStatus }) {
  */
 export function ConnectionBar({
   status,
+  everConnected,
   onRetry,
 }: {
   status: ConnectionStatus;
+  /**
+   * Has a snapshot ever landed on this mount?
+   *
+   * It changes what "offline" means. Having been in the room and lost it is a
+   * network blip and the room really does carry on without you. Never having
+   * reached it at all is a different sentence — usually a realtime service that
+   * is not running — and telling that person "everyone else is still in it" is
+   * a guess dressed as a fact.
+   */
+  everConnected: boolean;
   onRetry: () => void;
 }) {
   const failed = status === 'failed';
@@ -91,7 +102,9 @@ export function ConnectionBar({
 
           <span className="min-w-0 truncate">
             {failed
-              ? "Can't reach the room. Everyone else is still in it."
+              ? everConnected
+                ? "Can't reach the room. Everyone else is still in it."
+                : "Can't reach the realtime server, so this room cannot open. Chat, video sync and voice all need it."
               : 'Reconnecting… the room carries on without you for up to 45 seconds.'}
           </span>
 

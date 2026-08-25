@@ -234,6 +234,9 @@ export async function evaluateWaitForSlow(ctx: AppContext, roomId: string): Prom
 
     const untilServerMs = Date.now() + WAIT_FOR_SLOW_MAX_MS;
     ctx.io.to(roomChannel(roomId)).emit('video:waiting', { waitingFor: waiting, untilServerMs });
+    // §8.10 asks for a transcript line beside the pause, so the reason survives
+    // the ten seconds the status pill exists for.
+    await announceWait(ctx, roomId, waiting);
 
     const timer = setTimeout(() => {
       autoPaused.delete(roomId);
@@ -250,6 +253,30 @@ export async function evaluateWaitForSlow(ctx: AppContext, roomId: string): Prom
 
   // Set emptied: everyone caught up before the cap.
   await stopWaitingAndResume(ctx, roomId, 'recovered');
+}
+
+/**
+ * "Paused — waiting for Sam". Names, not ids: the transcript is prose.
+ *
+ * Presence is the only place a display name lives, and a user whose entry has
+ * already gone is simply left out — a line that says "waiting for" and then a
+ * uuid is worse than one that says "waiting for someone".
+ */
+async function announceWait(ctx: AppContext, roomId: string, waiting: string[]): Promise<void> {
+  const participants = await ctx.store.listParticipants(roomId);
+  const names = waiting
+    .map((id) => participants.find((p) => p.userId === id)?.displayName)
+    .filter((name): name is string => name !== undefined);
+  const [first, second] = names;
+  const who =
+    first === undefined
+      ? 'someone'
+      : second === undefined
+        ? first
+        : names.length === 2
+          ? `${first} and ${second}`
+          : `${names.length} people`;
+  ctx.chat.system(roomId, `wait:${waiting.slice().sort().join(',')}`, `Paused — waiting for ${who}`);
 }
 
 async function resumeAfterWait(
@@ -341,6 +368,16 @@ export function registerVideoHandlers(ctx: AppContext, socket: TypedSocket): voi
 
         next.revision = outcome.revision;
         broadcastVideoState(ctx, session.roomId, next, socket.data.userId, 'set_video');
+        // The transcript's answer to "why did the video change while I was
+        // reading?". Keyed on the video, not the actor, so setting the same
+        // video twice does not write two lines.
+        ctx.chat.system(
+          session.roomId,
+          `video:${next.videoRef ?? 'none'}`,
+          next.title === null || next.title.length === 0
+            ? `${socket.data.displayName} changed the video`
+            : `${socket.data.displayName} started ${next.title}`,
+        );
         void logRoomEvent(
           session.roomId,
           socket.data.userId,

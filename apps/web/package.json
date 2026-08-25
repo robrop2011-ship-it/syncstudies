@@ -28,6 +28,7 @@
     "@syncstudy/db": "workspace:*",
     "@syncstudy/shared": "workspace:*",
     "@tanstack/react-query": "^5.64.1",
+    "@tanstack/react-virtual": "^3.14.10",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "ioredis": "^5.4.2",

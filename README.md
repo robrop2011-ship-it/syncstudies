@@ -8,6 +8,10 @@ This repository is a pnpm workspace monorepo. Everything about the intended desi
 lives in [`PLAN.md`](./PLAN.md) — it is the contract, not a historical document.
 Architecture decisions that changed the plan are in [`docs/ADR/`](./docs/ADR).
 
+**Picking this up mid-build? Read [`docs/HANDOFF.md`](./docs/HANDOFF.md) first.** It is
+short, it says what is actually true about the code today rather than what was intended,
+and it lists the specific things that will otherwise waste your day.
+
 ---
 
 ## Prerequisites
@@ -86,6 +90,16 @@ data. To throw the database away and start clean, run
 - **Port 5432 or 6379 already taken** by a local Postgres or Redis — create
   `infra/.env` with `POSTGRES_PORT=5433` (or `REDIS_PORT=6380`) and update the
   matching URL in your `.env` files.
+- **"Too many sign-in attempts"** when you have barely tried — the login limiter is 5 per
+  15 minutes per handle and is **in-process**, so scripted logins lock you out of your own
+  dev environment. Restart `apps/web` to clear it.
+- **A room says it has ended but people are still in it** — the realtime service's room
+  cache was not invalidated. See [ADR 0003](./docs/ADR/0003-redis-in-the-web-tier.md).
+- **Every API route returns a plain-text `Internal Server Error`** — you ran `pnpm build`
+  while `next dev` was running and it rewrote `.next/` underneath it.
+  `rm -rf apps/web/.next` and restart.
+
+More, with the reasoning, in [`docs/RUNBOOK.md`](./docs/RUNBOOK.md) §6.
 
 ---
 
@@ -95,8 +109,12 @@ data. To throw the database away and start clean, run
 apps/web        Next.js 15 (App Router). Marketing page, auth pages, dashboard,
                 settings, and the room page. Owns all REST route handlers.
 apps/realtime   Fastify + Socket.IO. Owns the authoritative room state, the video
-                timeline, presence, and WebRTC signalling. Stateless; all room state
-                lives in Redis with a write-behind snapshot to Postgres.
+                timeline, presence, chat, and WebRTC signalling. Stateless; all room
+                state lives in Redis with a write-behind snapshot to Postgres.
+                  chat/      the write-behind queue, message send/dedupe, system lines
+                  rooms/     RoomStore, leader election, snapshotter, cross-node bus
+                  handlers/  one file per event family; context.ts holds the guard
+                             every handler starts with
 
 packages/shared The contract. Event names, Zod schemas, shared TypeScript types, the
                 tuning constants, id/room-code generation, the permission resolver,
@@ -104,7 +122,10 @@ packages/shared The contract. Event names, Zod schemas, shared TypeScript types,
                 (`positionAt`, `applyControl`, `decideControl`). Both the client and
                 the server import it from here. Two implementations would drift and
                 finding out why costs a week.
-packages/db     Prisma schema, the singleton client, and the seed script.
+packages/db     Prisma schema, the singleton client, the seed script, and the one
+                `messages` row → `MessageView` mapping — it lives here because both
+                services read that table and two mappings would be two chances for a
+                deleted message's body to escape.
 packages/auth   argon2id password hashing, opaque session tokens, handle rules, and
                 recovery codes. Framework-free on purpose: the socket handshake calls
                 `getSessionFromCookieHeader()` with a raw header string and no
@@ -113,7 +134,8 @@ packages/config Shared `tsconfig.base.json`.
 
 infra/          docker-compose for local Postgres/Redis/coturn, the hardened coturn
                 config, and the Fly.io config for the realtime service.
-docs/           ADRs and the backlog of things deliberately not being built yet.
+docs/           HANDOFF.md (start here), RUNBOOK.md (get it running), ADR/ (seven
+                decisions where the obvious choice is wrong), BACKLOG.md.
 ```
 
 Workspace packages are consumed as **TypeScript source** — each `package.json` points
@@ -148,36 +170,84 @@ ladder, the join and reconnect paths, and the numbers to tune are in
 
 ---
 
-## What is NOT built yet
+## How chat works
 
-This is a partially built repository. The list below is accurate as of the current
-commit; do not assume a feature exists because the plan describes it.
+Three properties, and each one is a decision rather than an implementation detail.
 
-**In the repository today:** Phases 1–4 are complete. You can sign up, create a room,
-share the code, have someone join it, and see live presence — on desktop and mobile.
-The schema is applied by a real migration and the auth and room flows have been
-verified end to end against PostgreSQL 18 and Redis 7.2, not just typechecked.
+**A broadcast never waits for Postgres.** A message is assigned a uuidv7 and a server
+timestamp, fanned out to the room, and *then* queued for insertion — 2 ms to the ack, 7 ms
+to the row, measured against PLAN §6.5's budget of 10 ms and 2 s. The consequence is the
+part worth knowing: for a few hundred milliseconds a message everyone can see does not
+exist in the database, so every path that reads one back — a delete, a report, a join
+snapshot — has to account for that. Two features shipped broken because of it and both of
+their tests passed. See **[ADR 0006](./docs/ADR/0006-chat-is-broadcast-first.md)**.
 
-You can also paste a YouTube link and watch it **in sync** — play, pause and seek
-propagate to everyone, late joiners land in the right place, and a client that falls
-behind is corrected automatically.
+**Retries are idempotent, across nodes.** An optimistic send carries a `client_msg_id`.
+The server remembers, in Redis for two minutes, which message that id already produced, so
+a retry after a reconnect re-acks the original instead of posting a second copy — and it is
+in Redis rather than in process memory precisely because a reconnect is when the client
+lands on a different node. A unique index on `(room_id, user_id, client_msg_id)` is the
+backstop underneath it.
 
-What is missing now is everything social around the video: **no chat, no voice, no
-shared notes.** Those are Phases 5, 6 and 7.
+**Ordering is by `id`, never by `created_at`.** Ids are uuidv7, so id order is time order
+— and unlike a timestamp it is a *total* order, identical on every client, with no ties to
+break. That single property gives correct pagination cursors, a correct reconnect backfill
+cursor, and one identical transcript on every screen. See
+**[ADR 0007](./docs/ADR/0007-order-messages-by-id.md)**.
 
-**Not implemented yet.** This table is the authoritative statement of what is missing:
+What the reader sees: history that survives a reload, `@41:12` timestamps anyone with
+playback permission can click to move the whole room, links rendered as text with a real
+anchor and **no unfurl of any kind**, known link-logger domains shown but not clickable,
+delete-your-own / host-deletes-any as tombstones rather than gaps, and reports that freeze
+a copy of the message so deleting it does not destroy the evidence.
 
-| Area | Phase in PLAN.md §14 | Status |
+---
+
+## What is and is not built
+
+The list below is accurate as of the current commit; do not assume a feature exists
+because the plan describes it.
+
+**All ten phases of PLAN.md §14 are implemented.** You can sign up, create a room, share
+the code, and have people join it. You can paste a YouTube link and watch it **in sync** —
+play, pause and seek propagate, late joiners land in the right place, and a client that
+falls behind is corrected automatically. You can talk about it in chat, with history that
+survives a reload and `@41:12` timestamps anyone can click to take the whole room there.
+You can join a voice call with camera and screen sharing. And you can keep shared notes
+that several people edit at once, pin a question to the second you were confused by, and
+tick off a shared checklist. On desktop and on mobile.
+
+| Area | Phase | Status |
 |---|---|---|
-| Synchronized video playback | Phase 4 | **Done.** Measured against the §15.3 simulator: spread p50 0.138s / p95 0.255s, 2.19 hard seeks per client-hour, no permanent divergence. `pnpm --filter @syncstudy/web test` runs it in under 3s and is the regression gate. |
-| Chat | Phase 5 | Not started. Schema and event types exist and the `chat:*` events are registered and guarded, but they ack `not_implemented`. No UI. |
-| Voice calls and WebRTC | Phase 6 | Not started. coturn is configured and runs locally, and the `rtc:*` events are registered and rate-limited, but they ack `not_implemented` — no signalling relay and no peer connections. |
-| Shared notes, questions, checklist | Phase 7 | Not started. |
-| Integration tests (Testcontainers) and E2E (Playwright) | Phases 3–9 | Not started. CI already runs Postgres and Redis service containers so these are a new file, not a CI change. |
-| Deployment to Vercel/Fly/Neon/Upstash | Phase 10 | Config is written (`infra/fly.realtime.toml`); nothing is deployed. |
+| Synchronized video playback | 4 | **Done.** Measured against the §15.3 simulator: spread p50 0.138s / p95 0.255s, 2.19 hard seeks per client-hour, no permanent divergence. |
+| Chat | 5 | **Done.** History with cursor pagination, optimistic send with retry, `@mm:ss` linkification, moderation, reports with a frozen snapshot. |
+| Voice, camera and screen sharing | 6 | **Done.** Full-mesh P2P with perfect negotiation, short-lived HMAC TURN credentials, the §9.5 reconnection ladder, Opus DTX, voice-activity detection, video ducking and push-to-talk. Signalling is verified by 17 integration tests; **real media between two browsers has not been verified here** — see below. |
+| Shared notes, questions, checklist | 7 | **Done.** Block-locked concurrent editing where a conflict duplicates a paragraph rather than losing one, questions pinned to a timestamp and rendered as clickable ticks on the scrubber, and an attributed shared checklist. |
+| UI/UX, responsive, onboarding | 8 | **Done.** Keyboard shortcuts with a sheet, a three-step coach-mark for a first-time host, legal pages, honest empty states, responsive to 375px. |
+| Hardening and testing | 9 | **Done.** 77 integration tests against real Postgres and Redis, in CI. Security headers complete. Load test run — 7 of 8 §15.5 targets met. |
+| Deployment | 10 | **Configured.** [`docs/VERCEL.md`](./docs/VERCEL.md) is a twenty-minute path to a personal test deployment; [`docs/DEPLOY.md`](./docs/DEPLOY.md) is the production architecture. `vercel.json`, `render.yaml`, `infra/fly.realtime.toml` and `apps/realtime/Dockerfile` are all written. Nothing is deployed from this repository — that needs accounts. |
+| Avatar upload | 2 | **Not built.** The read path and the generated fallback avatar exist; the upload needs a Cloudflare R2 bucket. See [`docs/HANDOFF.md`](./docs/HANDOFF.md) §10. |
+
+**What has not been verified from here**, stated plainly rather than left to be found:
+real WebRTC media flowing between two browsers (needs two contexts with fake media
+devices — the §15.4 Playwright suite), a relayed TURN connection (needs a deployed
+coturn), axe-core in CI, and the §15.6 browser matrix beyond one Chromium-based browser.
+[`docs/HANDOFF.md`](./docs/HANDOFF.md) §10 has the full list with reasons.
 
 Anything in [`docs/BACKLOG.md`](./docs/BACKLOG.md) is out of scope until the MVP in
 PLAN.md §13 has shipped.
+
+### Deploying
+
+**Vercel hosts half of this app.** `apps/web` is stateless and fits it exactly.
+`apps/realtime` does not and cannot — it holds long-lived WebSockets and per-room state,
+which a serverless function has no way to do. Deploy only to Vercel and you get a site
+where you can sign up and create a room, and where opening that room says "Can't reach the
+realtime server": video sync, chat, voice and notes all live on the socket.
+
+[`docs/VERCEL.md`](./docs/VERCEL.md) is the two-service walkthrough — Vercel plus one
+container host, Neon and Upstash — with the chicken-and-egg between `ALLOWED_ORIGINS` and
+`NEXT_PUBLIC_REALTIME_URL` spelled out, because it catches everyone once.
 
 ---
 
@@ -188,12 +258,57 @@ pnpm test:unit     # packages/shared and packages/auth — no database, no netwo
 pnpm test          # everything
 ```
 
-The unit suites cover the parts where a bug is expensive and invisible: the video
-timeline and its asymmetries, control conflict resolution, YouTube URL parsing, room
-and recovery code generation, timestamp formatting, the permission resolver, password
-and handle rules, recovery-code verification, and cookie parsing. The argon2 tests are
+412 unit tests across four suites, covering the parts where a bug is expensive and invisible:
+the video timeline and its asymmetries, control conflict resolution, YouTube URL parsing,
+the chat message tokenizer (what may become a clickable link, and what may not), room and
+recovery code generation, timestamp formatting, the permission resolver, password and
+handle rules, recovery-code verification, and cookie parsing. The argon2 tests are
 intentionally slow — the hashing parameters are the OWASP baseline and are not weakened
 for the test suite; the vitest timeout is raised instead.
+
+**The sync simulator is the regression gate for the sync engine.** `pnpm --filter
+@syncstudy/web test` runs PLAN §15.3's scenario — six virtual clients, 1800 virtual
+seconds, 36 000 samples, injected latency, loss, clock skew, an ad-break stall, an outage
+and a late join — in under three seconds, and asserts the spread targets. Run it before and
+after any change under `lib/sync/`.
+
+### Integration tests
+
+```bash
+pnpm --filter @syncstudy/realtime test:integration
+```
+
+**77 tests against real Postgres and real Redis**, also run in CI. They boot the real
+realtime server on an ephemeral port and drive real sockets through it: joins, bans,
+capacity races, host transfer, chat ordering and dedupe, the atomic video transact under
+concurrent seeks, WebRTC signalling authorization and the mesh caps, and the shared-notes
+conflict rule.
+
+They exist because an entire class of bug is invisible to the unit suite — stale caches,
+ghost memberships, cross-node fan-out, read-after-write races against the chat queue —
+and every one of those this project has actually shipped typechecked, linted and built
+cleanly first.
+
+**No test in that suite sleeps before an assertion.** A test that gives the system a
+moment to catch up passes against exactly the broken code it was written to catch; two
+shipped features were broken this way. See [ADR 0006](./docs/ADR/0006-chat-is-broadcast-first.md).
+
+That suite found a real bug on its first run: two `uuidv7` values minted in the same
+millisecond sorted arbitrarily against each other, which is the exact property the chat
+transcript's ordering rests on ([ADR 0007](./docs/ADR/0007-order-messages-by-id.md)).
+
+### Load test
+
+```bash
+cd apps/realtime
+MAX_CONNECTIONS_PER_IP=2000 pnpm --filter @syncstudy/realtime dev   # in another terminal
+npx tsx --env-file=.env scripts/load-test.mjs --sockets 500 --rooms 60 --seconds 45
+```
+
+500 sockets across 60 rooms: event-loop lag p99 11.4 ms, RSS 262 MB, broadcast p95 24 ms,
+zero messages dropped, and 200 simultaneous joins to a room capped at 12 admitting exactly
+12. The one §15.5 target not met is the Lua transact p99, measured on a laptop that was
+also running the load generator — see [`docs/HANDOFF.md`](./docs/HANDOFF.md) §6d.
 
 ---
 
@@ -204,4 +319,22 @@ colour used only for the primary action and focus rings, no gradients on surface
 glow, motion limited to 120–160 ms opacity and transform transitions, Inter at
 12/13/14/16/20/28, lucide icons at 16px/1.5 stroke, and never an emoji in UI chrome.
 The enforceable version of that list, including the explicit "don't do this" list, is
-PLAN.md §12.
+PLAN.md §12. These are requirements, not preferences — the brief was explicitly that this
+must not look AI-generated.
+
+Two rules are worth restating because they are easy to violate while being helpful:
+
+- **State is never carried by colour alone** (§12.6). Every state that has a coloured dot
+  also has a word next to it, and an `aria-label` that says the same thing in a sentence.
+- **Never fake unbuilt functionality.** An unfinished area shows an honest empty state
+  saying what goes there. A mock message list or a placeholder player is worse than
+  nothing: it hides the gap from the next person and from the user.
+
+Three greps that should return no real hits (matches inside comments explaining why a
+pattern is *avoided* are expected, and there are two):
+
+```bash
+grep -rn 'bg-gradient\|backdrop-blur\|animate-pulse\|shimmer' apps/web/components apps/web/app
+grep -rEn 'duration-(2[0-9]{2}|[3-9][0-9]{2})' apps/web/components apps/web/app
+grep -rn 'rounded-full' apps/web/components | grep -i button
+```

@@ -17,7 +17,7 @@ import { normalizeRoomCode } from '@syncstudy/shared';
 import { prisma } from '@syncstudy/db';
 import { RoomClosedScreen } from '@/components/room/RoomClosedScreen';
 import { RoomShell } from '@/components/room/RoomShell';
-import type { RoomBootstrap } from '@/components/room/types';
+import type { RoomBootstrap, RoomPreferences } from '@/components/room/types';
 import { getCurrentSession } from '@/lib/server/session';
 import { avatarUrlFor } from '@/lib/server/views';
 
@@ -52,6 +52,39 @@ const loadBan = cache(async (roomId: string, userId: string) =>
     select: { userId: true },
   }),
 );
+
+const loadSettings = cache(async (userId: string) =>
+  prisma.userSettings.findUnique({
+    where: { userId },
+    select: {
+      joinMuted: true,
+      joinCameraOff: true,
+      pushToTalk: true,
+      hideIpFromPeers: true,
+      reduceMotion: true,
+    },
+  }),
+);
+
+/**
+ * The safe defaults are the DEFAULTS, not a fallback (§11.9). A user with no
+ * settings row, or a minor whatever their row says, arrives muted, with the
+ * camera off, and with their address hidden from peers. Resolving this on the
+ * server rather than in the call layer means there is no window in which the
+ * client is running with the wrong answer.
+ */
+function resolvePreferences(
+  row: Awaited<ReturnType<typeof loadSettings>>,
+  isMinor: boolean,
+): RoomPreferences {
+  return {
+    joinMuted: row?.joinMuted ?? true,
+    joinCameraOff: row?.joinCameraOff ?? true,
+    pushToTalk: row?.pushToTalk ?? false,
+    hideIpFromPeers: isMinor || (row?.hideIpFromPeers ?? false),
+    reduceMotion: row?.reduceMotion ?? false,
+  };
+}
 
 /**
  * The room name is only ever put in the document title for someone who is
@@ -114,6 +147,8 @@ export default async function RoomPage({ params }: RouteParams) {
     return <RoomClosedScreen kind="banned" roomName={room.name} code={room.code} />;
   }
 
+  const settings = await loadSettings(session.user.id);
+
   const bootstrap: RoomBootstrap = {
     roomId: room.id,
     code: room.code,
@@ -130,6 +165,7 @@ export default async function RoomPage({ params }: RouteParams) {
       displayName: session.user.displayName,
       avatarUrl: avatarUrlFor(session.user.avatarKey),
     },
+    prefs: resolvePreferences(settings, session.user.isMinor),
   };
 
   return <RoomShell roomCode={room.code} bootstrap={bootstrap} />;
