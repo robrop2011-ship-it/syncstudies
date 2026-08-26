@@ -103,7 +103,7 @@ export const INITIAL_MESSAGE_COUNT = 50;
 export const MESSAGE_BACKFILL_MAX = 200;
 
 // ── Accounts (PLAN.md Amendment A1) ─────────────────────────────────────────
-export const MIN_PASSWORD_LENGTH = 10;
+export const MIN_PASSWORD_LENGTH = 6;
 export const MAX_PASSWORD_LENGTH = 200;
 export const HANDLE_MIN = 3;
 export const HANDLE_MAX = 20;
