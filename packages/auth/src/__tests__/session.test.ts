@@ -190,6 +190,17 @@ describe('sessionCookieOptions', () => {
     expect(sessionCookieOptions(expires, true).secure).toBe(true);
   });
 
+  it('switches to SameSite=None once secure, so the cross-site socket handshake carries it', () => {
+    // The realtime service is a different origin, and on a host whose wildcard
+    // domain is on the Public Suffix List (Railway, Render, Fly) that origin is
+    // a different *site*. A Lax cookie would be withheld from the handshake and
+    // the room would reconnect forever. `None` requires `Secure`, hence the tie.
+    const opts = sessionCookieOptions(expires, true);
+
+    expect(opts.sameSite).toBe('none');
+    expect(opts.secure).toBe(true);
+  });
+
   it('defaults to secure in production', () => {
     vi.stubEnv('NODE_ENV', 'production');
     try {

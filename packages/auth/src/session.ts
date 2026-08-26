@@ -166,12 +166,37 @@ export async function getSessionFromCookieHeader(
   return validateSessionToken(token, db);
 }
 
-/** Cookie attributes, in one place so web and any future surface can't disagree. */
+/**
+ * Cookie attributes, in one place so web and any future surface can't disagree.
+ *
+ * `sameSite` is deployment-dependent, and that is the whole subtlety here.
+ *
+ * The Socket.IO handshake authenticates from THIS cookie (§11.4), and the
+ * realtime service always lives on a different origin. Whether the browser
+ * considers that origin "same site" depends on where it is deployed:
+ *
+ *   rt.syncstudy.app  next to  syncstudy.app   → same registrable domain, Lax is sent
+ *   two *.up.railway.app subdomains            → NOT same site, Lax is withheld
+ *
+ * The second case is not obvious: `up.railway.app` is on the Public Suffix List,
+ * so each generated subdomain is its own registrable domain. A Lax cookie never
+ * reaches the handshake, `authenticate()` returns `unauthenticated`, and the
+ * client reconnects forever — the room flickers Offline/Connecting and never
+ * settles. Same for any other PaaS whose wildcard domain is on the PSL.
+ *
+ * `None` is therefore the only value that works on both topologies, and it
+ * requires `Secure`, which is why it is tied to that flag: development stays Lax
+ * on http://localhost, where `None` would be rejected outright.
+ *
+ * This does not weaken CSRF. Every mutating route calls `requireSameOrigin`
+ * (apps/web/lib/server/request.ts), which is an independent, enforced check —
+ * SameSite was always the backstop to it, not the other way round.
+ */
 export function sessionCookieOptions(expiresAt: Date, secure = process.env.NODE_ENV === 'production') {
   return {
     httpOnly: true,
     secure,
-    sameSite: 'lax' as const,
+    sameSite: secure ? ('none' as const) : ('lax' as const),
     path: '/',
     expires: expiresAt,
   };
