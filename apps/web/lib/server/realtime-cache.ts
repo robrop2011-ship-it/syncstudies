@@ -96,6 +96,24 @@ export async function invalidateRoomCache(roomId: string, code?: string): Promis
   }
 }
 
+/**
+ * Write a socket handshake ticket (§11.4).
+ *
+ * Unlike `invalidateRoomCache` this one THROWS on failure, and the difference is
+ * deliberate. A missed cache invalidation degrades — the change lands when the
+ * TTL expires. A missed ticket does not degrade: the client would take a token
+ * that was never stored, the handshake would refuse it, and the room would sit
+ * there retrying. Better to fail the mint loudly so the caller sees a 500 and
+ * the reason reaches a log.
+ */
+export async function storeRealtimeTicket(key: string, userId: string, ttlMs: number): Promise<void> {
+  const conn = redis();
+  if (conn === null) {
+    throw new Error('REDIS_URL is not configured; the realtime handshake cannot be authenticated');
+  }
+  await conn.set(key, userId, 'PX', ttlMs);
+}
+
 /** Test seam: drop the shared client so a suite can swap REDIS_URL. */
 export async function __resetRealtimeCacheClient(): Promise<void> {
   const conn = client;

@@ -6,14 +6,24 @@
  *   1. Origin allowlist. Socket.IO does NOT enforce same-origin by itself, so
  *      without this any page on the internet can open an authenticated socket
  *      with the user's cookie riding along.
- *   2. Session from the SAME httpOnly cookie the web app sets. No tokens in
- *      query strings — query strings land in access logs and Referer headers.
+ *   2. Identity, from a single-use handshake ticket in the `auth` payload, or
+ *      failing that the httpOnly cookie the web app sets. Still no tokens in
+ *      QUERY STRINGS — those land in access logs and Referer headers; the `auth`
+ *      payload does not. See packages/auth/src/realtime-ticket.ts for why the
+ *      cookie alone is not enough on a host whose wildcard domain is on the
+ *      Public Suffix List.
  *   3. Per-IP connection cap, to blunt socket-exhaustion DoS.
  *
  * Room membership is deliberately NOT checked here. It is checked in
  * `room:join`, against Postgres, every time (§11.3 "ghost joins").
  */
-import { getSessionFromCookieHeader, hashIp } from '@syncstudy/auth';
+import {
+  getSessionFromCookieHeader,
+  hashIp,
+  realtimeTicketKey,
+  sessionUserById,
+  type SessionUser,
+} from '@syncstudy/auth';
 import type { Logger } from '../logger.js';
 import type { TypedSocket } from '../handlers/context.js';
 import { keys, type ScriptedRedis } from '../redis.js';
@@ -110,6 +120,59 @@ export async function releaseConnection(
   await redis.zrem(keys.ipConnections(ipHash), socketId).catch(() => undefined);
 }
 
+/**
+ * Redeem a handshake ticket for the user id it was minted against.
+ *
+ * GET and DEL in one MULTI: the read and the burn must not be separable, or two
+ * sockets racing the same captured ticket could both be admitted.
+ */
+async function redeemTicket(redis: ScriptedRedis, ticket: string): Promise<string | null> {
+  const key = realtimeTicketKey(ticket);
+  const results = await redis.multi().get(key).del(key).exec();
+  const got = results?.[0];
+  if (!got || got[0] !== null) return null;
+  return typeof got[1] === 'string' && got[1].length > 0 ? got[1] : null;
+}
+
+function ticketFrom(socket: TypedSocket): string | null {
+  const value: unknown = (socket.handshake.auth as Record<string, unknown> | undefined)?.['ticket'];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * Who is on the other end of this socket, by ticket or by cookie.
+ *
+ * The ticket is tried first and the cookie is the fallback, not the reverse: on
+ * a same-site deployment both are present and either would do, but on a
+ * cross-site one only the ticket arrives. Preferring the ticket means one code
+ * path is exercised everywhere instead of a fallback that only ever runs in
+ * production, where nobody is watching it.
+ *
+ * A ticket that fails to redeem falls through to the cookie rather than
+ * refusing outright — an expired ticket on a same-site deployment should not
+ * lock out a browser that is still sending a perfectly good cookie.
+ */
+async function resolveIdentity(
+  socket: TypedSocket,
+  deps: HandshakeDeps,
+): Promise<{ user: SessionUser } | null> {
+  const ticket = ticketFrom(socket);
+  if (ticket !== null) {
+    try {
+      const userId = await redeemTicket(deps.redis, ticket);
+      if (userId !== null) {
+        const user = await sessionUserById(userId);
+        if (user !== null) return { user };
+      }
+    } catch (err) {
+      deps.log.warn({ socketId: socket.id, err }, 'ticket redemption failed; trying cookie');
+    }
+  }
+
+  const session = await getSessionFromCookieHeader(socket.handshake.headers.cookie);
+  return session === null ? null : { user: session.user };
+}
+
 export type HandshakeMiddleware = (socket: TypedSocket, next: (err?: Error) => void) => void;
 
 export function createHandshakeMiddleware(deps: HandshakeDeps): HandshakeMiddleware {
@@ -134,8 +197,8 @@ async function authenticate(socket: TypedSocket, deps: HandshakeDeps): Promise<H
     return 'bad_origin';
   }
 
-  // 2. Session from the httpOnly cookie.
-  const session = await getSessionFromCookieHeader(socket.handshake.headers.cookie);
+  // 2. Identity: handshake ticket, else the cookie.
+  const session = await resolveIdentity(socket, deps);
   if (!session) {
     deps.log.debug({ socketId: socket.id }, 'handshake rejected: unauthenticated');
     return 'unauthenticated';

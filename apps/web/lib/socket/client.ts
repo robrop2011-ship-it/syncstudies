@@ -8,10 +8,14 @@
  *    `fly scale count N` needs no sticky sessions (§6.1). It also keeps us inside
  *    the app's own CSP, whose `connect-src` allows `ws:`/`wss:` but not an `http:`
  *    origin on another port — allowing polling would mean widening the CSP.
- *  - `withCredentials: true` — the handshake authenticates from the SAME httpOnly
- *    session cookie the web app sets (§11.4). No token ever travels in a query
- *    string, because query strings land in access logs and Referer headers, so
- *    without the cookie the handshake is anonymous and is refused.
+ *  - `withCredentials: true` — kept, but no longer sufficient on its own. The
+ *    handshake prefers a ticket from the `auth` payload and falls back to this
+ *    httpOnly session cookie (§11.4). The cookie only reaches a realtime service
+ *    the browser considers same-site, which is true of `rt.syncstudy.app` beside
+ *    `syncstudy.app` and false of two `*.up.railway.app` subdomains — see
+ *    packages/auth/src/realtime-ticket.ts. Still no token in a QUERY STRING: the
+ *    `auth` payload travels in the handshake body, which does not land in access
+ *    logs or Referer headers, and that was the actual point of that rule.
  *  - `autoConnect: false` — the provider owns the lifecycle. Connecting inside the
  *    constructor races React's StrictMode double-mount, and the socket that loses
  *    the race is a zombie: still connected, still receiving room broadcasts, with
@@ -51,12 +55,24 @@ export function realtimeUrl(): string | null {
   return typeof configured === 'string' && configured.length > 0 ? configured : null;
 }
 
-export function createSocket(url: string): TypedClientSocket {
+/**
+ * Supplies the handshake `auth` payload.
+ *
+ * Callback-shaped rather than a plain object because socket.io invokes it before
+ * EVERY connection attempt, reconnects included. A ticket is single-use and
+ * expires in two minutes, so a static object would authenticate the first
+ * connection and then silently fail every reconnect after it — the exact bug
+ * class this whole mechanism exists to remove.
+ */
+export type HandshakeAuth = (cb: (payload: Record<string, unknown>) => void) => void;
+
+export function createSocket(url: string, auth?: HandshakeAuth): TypedClientSocket {
   // `io()` is not generic in socket.io-client v4; the event maps are applied by
   // annotating the binding, which is the pattern the library's own docs use.
   const socket: TypedClientSocket = io(url, {
     transports: ['websocket'],
     withCredentials: true,
+    ...(auth === undefined ? {} : { auth }),
     autoConnect: false,
     forceNew: true,
     reconnection: true,

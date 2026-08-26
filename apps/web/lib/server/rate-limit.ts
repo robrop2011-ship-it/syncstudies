@@ -127,6 +127,20 @@ export const RATE_LIMITS = {
     failClosed: true,
     message: 'Too many attempts. Try again in an hour.',
   },
+  /**
+   * Socket handshake tickets (§11.4). One is minted per connection attempt, and
+   * socket.io's backoff tops out at one attempt every 10s — so a client on a
+   * flapping connection needs roughly six a minute and this leaves headroom for
+   * several tabs. Fails OPEN: refusing a ticket during a Redis wobble would lock
+   * a signed-in user out of a room they are already entitled to be in, which is
+   * a worse outcome than an unmetered mint.
+   */
+  'realtime:ticket:user': {
+    limit: 120,
+    windowMs: 5 * MINUTE,
+    failClosed: false,
+    message: 'Reconnecting too often. Wait a moment and reload.',
+  },
 } as const satisfies Record<string, RateLimitPolicy>;
 
 export type RateScope = keyof typeof RATE_LIMITS;

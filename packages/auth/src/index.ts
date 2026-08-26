@@ -12,4 +12,5 @@ export * from './handle';
 export * from './display-name';
 export * from './recovery';
 export * from './session';
+export * from './realtime-ticket';
 export { COMMON_PASSWORDS } from './common-passwords';

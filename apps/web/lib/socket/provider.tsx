@@ -27,6 +27,7 @@ import {
   WAIT_FOR_SLOW_MAX_MS,
 } from '@syncstudy/shared';
 import { createSocket, realtimeUrl, type TypedClientSocket } from '@/lib/socket/client';
+import { ticketAuth } from '@/lib/socket/ticket';
 import { ServerClock, ServerClockContext } from '@/lib/sync/clock';
 import { createSyncBridge, type AnchorReason, type SyncBridge } from '@/lib/sync/controller';
 import { SyncProvider } from '@/lib/sync/provider';
@@ -141,7 +142,7 @@ export function RoomSocketProvider({
       return;
     }
 
-    const activeSocket = createSocket(url);
+    const activeSocket = createSocket(url, ticketAuth());
     const activeClock = new ServerClock(activeSocket);
     const manager = activeSocket.io;
 
