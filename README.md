@@ -108,9 +108,14 @@ More, with the reasoning, in [`docs/RUNBOOK.md`](./docs/RUNBOOK.md) §6.
 ```
 apps/web        Next.js 15 (App Router). Marketing page, auth pages, dashboard,
                 settings, and the room page. Owns all REST route handlers.
+                  lib/sync/  clock, YouTube adapter, drift loop, the §15.3 simulator
+                  lib/ink/   ephemeral annotation: batching, ageing, canvas + rAF
+                  lib/call/  the WebRTC mesh transport
+                  lib/socket/, lib/stores/  typed client and the per-room store
 apps/realtime   Fastify + Socket.IO. Owns the authoritative room state, the video
-                timeline, presence, chat, and WebRTC signalling. Stateless; all room
-                state lives in Redis with a write-behind snapshot to Postgres.
+                timeline, presence, chat, WebRTC signalling and the ink relay.
+                Stateless; all room state lives in Redis with a write-behind
+                snapshot to Postgres.
                   chat/      the write-behind queue, message send/dedupe, system lines
                   rooms/     RoomStore, leader election, snapshotter, cross-node bus
                   handlers/  one file per event family; context.ts holds the guard
@@ -134,7 +139,7 @@ packages/config Shared `tsconfig.base.json`.
 
 infra/          docker-compose for local Postgres/Redis/coturn, the hardened coturn
                 config, and the Fly.io config for the realtime service.
-docs/           HANDOFF.md (start here), RUNBOOK.md (get it running), ADR/ (seven
+docs/           HANDOFF.md (start here), RUNBOOK.md (get it running), ADR/ (eight
                 decisions where the obvious choice is wrong), BACKLOG.md.
 ```
 
@@ -203,6 +208,35 @@ a copy of the message so deleting it does not destroy the evidence.
 
 ---
 
+## How ink works
+
+Ink is the one feature in the app with **no durable write at all**. It is worth
+understanding as the counter-example to everything else here.
+
+A pointer moves at up to 120 Hz. Those points are buffered and flushed on a 50 ms timer, so
+a drawing user sends about 20 small messages a second, each carrying only the points added
+since the last flush — appended by stroke id on the receiving side, never the whole stroke
+again. The server validates, checks the `annotate` permission and the room's
+`annotations_enabled` policy, stamps a server timestamp, and relays to everyone except the
+sender. It keeps nothing. There is no ack, because an ack per batch at 20 Hz is pure
+overhead and a stroke that goes missing was a gesture nobody saw.
+
+Rendering is a canvas and a `requestAnimationFrame` loop that **stops itself when there is
+no ink** and restarts on the next stroke. React state is never touched per point or per
+frame — a `setState` on the hot path re-renders the room and stutters the player on the
+low-end laptops this product is for (§5.4).
+
+Each stroke is opaque for `INK_HOLD_MS`, ramps to nothing over `INK_FADE_MS`, and is then
+deleted. It ages against **server** time, so the same stroke dies at the same instant on
+every screen rather than lingering on whichever machine has the slower clock.
+
+Two things in there look like mistakes and are not. Coordinates are 0..1 against the
+**picture** — the centred 16:9 rect inside the stage box — and not against the box itself,
+which is not reliably 16:9. And when the active-stroke table is full, eviction takes the
+*arriving author's* oldest stroke rather than the room's, so a client flooding stroke ids
+can only ever cost itself. Both are [ADR 0008](./docs/ADR/0008-ink-is-ephemeral.md).
+
+
 ## What is and is not built
 
 The list below is accurate as of the current commit; do not assume a feature exists
@@ -215,7 +249,8 @@ falls behind is corrected automatically. You can talk about it in chat, with his
 survives a reload and `@41:12` timestamps anyone can click to take the whole room there.
 You can join a voice call with camera and screen sharing. And you can keep shared notes
 that several people edit at once, pin a question to the second you were confused by, and
-tick off a shared checklist. On desktop and on mobile.
+tick off a shared checklist. And you can **draw over the video** — everyone sees the stroke
+as you make it, and it fades away a few seconds later. On desktop and on mobile.
 
 | Area | Phase | Status |
 |---|---|---|
@@ -223,6 +258,7 @@ tick off a shared checklist. On desktop and on mobile.
 | Chat | 5 | **Done.** History with cursor pagination, optimistic send with retry, `@mm:ss` linkification, moderation, reports with a frozen snapshot. |
 | Voice, camera and screen sharing | 6 | **Done.** Full-mesh P2P with perfect negotiation, short-lived HMAC TURN credentials, the §9.5 reconnection ladder, Opus DTX, voice-activity detection, video ducking and push-to-talk. Signalling is verified by 17 integration tests; **real media between two browsers has not been verified here** — see below. |
 | Shared notes, questions, checklist | 7 | **Done.** Block-locked concurrent editing where a conflict duplicates a paragraph rather than losing one, questions pinned to a timestamp and rendered as clickable ticks on the scrubber, and an attributed shared checklist. |
+| Ephemeral shared ink | — | **Done.** Draw over the video with a pointer or a finger; strokes fan out live and fade after a few seconds. Nothing is stored — no table, no Redis key, no replay ([ADR 0008](./docs/ADR/0008-ink-is-ephemeral.md)). Host can switch it off per room. Verified against a live second participant: coordinates matched to four decimals. |
 | UI/UX, responsive, onboarding | 8 | **Done.** Keyboard shortcuts with a sheet, a three-step coach-mark for a first-time host, legal pages, honest empty states, responsive to 375px. |
 | Hardening and testing | 9 | **Done.** 77 integration tests against real Postgres and Redis, in CI. Security headers complete. Load test run — 7 of 8 §15.5 targets met. |
 | Deployment | 10 | **Configured.** [`docs/VERCEL.md`](./docs/VERCEL.md) is a twenty-minute path to a personal test deployment; [`docs/DEPLOY.md`](./docs/DEPLOY.md) is the production architecture. `vercel.json`, `render.yaml`, `infra/fly.realtime.toml` and `apps/realtime/Dockerfile` are all written. Nothing is deployed from this repository — that needs accounts. |

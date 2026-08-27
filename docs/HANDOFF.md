@@ -83,6 +83,7 @@ Lucide icons instead of emoji, no rounded-full buttons. There is a grep-able aud
 | 7 — Study tools | **Done and verified.** Block-locked shared notes, timestamped questions with scrubber ticks, shared checklist. 43 live-stack checks, 16 integration tests, and a browser pass |
 | 8 — UI polish | **Done.** Shortcut sheet, onboarding coach-marks, legal pages, responsive to 375px, honest empty states everywhere. **No axe-core in CI and no visual-regression snapshots** — see §11 |
 | 9 — Hardening | **Done.** 77 integration tests against real Postgres and Redis, in CI. HSTS added, `connect-src` narrowed to the realtime origin. Load test written and run: 7 of 8 §15.5 targets met — see §6 |
+| — Ephemeral ink | **Done and verified against a live second participant.** Draw over the video, strokes fade, nothing persists. Added after Phase 10; see §6e and ADR 0008 |
 | 10 — Deploy | **Prepared, not deployed.** Dockerfile, Fly config, `docs/DEPLOY.md`, `SECURITY.md`, moderation runbook, in-room feedback capture. Deploying needs accounts this repo does not have |
 
 **The whole server half of video sync was built in Phase 3** and is tested:
@@ -413,6 +414,69 @@ transact histogram read zero calls while looking busy; and `ss_redis_transact_ms
 had no bucket at 3 ms, so the §15.5 target it is measured against fell inside a
 bucket and could be neither passed nor failed honestly. Both fixed.
 
+## 6e. Ephemeral shared ink
+
+Added after Phase 10, so it sits outside the phase numbering. PLAN.md Amendment A4 and
+[ADR 0008](./ADR/0008-ink-is-ephemeral.md).
+
+Draw over the video with a pointer or a finger; everyone in the room sees the stroke as it
+is made, and it fades out a few seconds later. A shared laser pointer, not a whiteboard.
+
+| Piece | File |
+|---|---|
+| Engine — batching, ageing, canvas + rAF | `apps/web/lib/ink/controller.ts` |
+| The coordinate transform, used by BOTH ends | `apps/web/lib/ink/geometry.ts` |
+| Per-user colour, matched to the avatar tint | `apps/web/lib/ink/colors.ts` |
+| Overlay, pointer capture, draw-mode ring | `apps/web/components/room/InkOverlay.tsx` |
+| Toolbar, the `D` shortcut, first-run line | `apps/web/components/room/InkToolbar.tsx` |
+| Server relay — validates, authorizes, forgets | `apps/realtime/src/handlers/draw.ts` |
+
+**It stores nothing.** No table, no Redis key, no snapshot field, no replay. A stroke that
+expired before you joined is correctly invisible. This is the only event family in the app
+with no durable write, which is why it can afford to be the highest-frequency one.
+
+**Verified against a live second participant:** three strokes and a clear fanned out, and
+every coordinate matched the hand-computed value to four decimals — a drag across a 900×506
+canvas arrived as `x 0.1778 → 0.8889` at `y 0.5049`. Confirmed no ink/stroke/draw table
+exists and no matching Redis key.
+
+### What review caught, and what it cost
+
+Worth reading, because three of these were invisible to typecheck, lint, and a working
+browser session:
+
+1. **The feature was entirely inert.** `InkProvider` was never mounted, so every
+   `useInk()` returned `null` — the canvas drew nothing and nothing went over the wire.
+   Nobody owned `RoomShell` in the build split.
+2. **Coordinates were normalised against the stage box**, which is not reliably 16:9. That
+   defeats the whole point of normalising, and only shows up when two people have
+   differently shaped windows. See ADR 0008 — this is the one to read.
+3. **One client could evict everyone else's ink**, because eviction was globally
+   oldest-first and the server holds no stroke state to stop it. Now per-author, and
+   mutation-tested: reverting it fails
+   `apps/web/lib/ink/__tests__/controller.test.ts`.
+4. **A stroke could be kept alive forever** by resending duplicate points, because the fade
+   countdown refreshed on every message rather than only when the stroke grew.
+5. **The disabled pencil told the host "guests cannot draw"** whenever the room policy was
+   off, because the server folds role and policy into one `canAnnotate` flag and the UI
+   checked the role branch first.
+6. **Draw mode followed you into the next room** — a module-level global — leaving an
+   invisible canvas over the player that ate the first click on play.
+
+### Known, and worth your attention
+
+- **`draw:*` is fire-and-forget by design, so a refusal is silent.** No ack, because an ack
+  per batch at 20 Hz is pure overhead. The cost is that a rejected stroke looks exactly
+  like a stroke nobody drew. If ink ever "does not work", check the server first — the
+  client will not tell you.
+- **Ink covers the video, not the whole window.** The sidebar and control bar are laid out
+  differently for every participant and at narrow widths some do not exist, so a coordinate
+  there means nothing to anyone else. If you want ink over a shared screen share, that is
+  the same problem solved the same way: normalise against the shared surface.
+- **Server-side per-stroke caps are deliberately absent.** Counting points across batches
+  means holding the stroke, which is the state the feature refuses to have. The ceiling is
+  the rate limit plus the receiver's per-author cap.
+
 ## 7. Things that will waste your day
 
 **The realtime service and the web app are two deploys.** The web app is stateless and can
@@ -433,6 +497,18 @@ event or request body is a red flag; every handler reads `socket.data.userId`.
 **Every socket handler starts with a permission assertion.** There is one resolver,
 `packages/shared/src/permissions.ts`. If you find yourself writing `if (role === 'host')`
 in a handler, add a `Permission` instead.
+
+**A long-lived dev process will not have your new handler.** `pnpm dev:realtime` runs
+under `tsx watch`, but a realtime service started any other way — by a previous session, or
+by hand — does not reload. It answers `/health` happily, serves every event it already
+knew about, and **silently drops the one you just wrote**, because Socket.IO ignores events
+with no listener. Symptom: your feature works locally and the other participant receives
+nothing. Check `ps aux | grep 'tsx watch'` before you debug the code.
+
+**Fire-and-forget events fail silently, on purpose.** `draw:*` and `presence:update` carry
+no ack. A rejected payload — bad schema, missing permission, rate limited — looks exactly
+like one that was never sent. That is the right trade for 20 Hz ink, but it means the
+server log is the only place the truth lives.
 
 **The login rate limiter is in-process and will lock you out of your own dev
 environment** after five scripted logins. Restart `apps/web` to clear it.
@@ -511,7 +587,7 @@ For chat specifically, the read-back paths are the ones that break: write the te
 PLAN.md                        the blueprint — 20 sections, §8 is the product
 docs/HANDOFF.md                this file
 docs/RUNBOOK.md                dev environment, including the no-Docker path
-docs/ADR/                      seven decisions where the obvious choice is wrong
+docs/ADR/                      eight decisions where the obvious choice is wrong
 docs/BACKLOG.md                deliberately not being built yet
 
 packages/shared/               THE CONTRACT — Zod schemas, typed socket event maps,
@@ -533,6 +609,7 @@ apps/realtime/                 Fastify + Socket.IO. Rooms, presence, host contro
   scripts/                     live-stack verification and the §15.5 load test
 apps/web/                      Next.js 15. Marketing, auth, dashboard, settings, room
   lib/sync/                    clock, player adapter, sync controller, simulator
+  lib/ink/                     ephemeral annotation: batching, ageing, canvas
   lib/socket/                  typed client, provider, connection lifecycle
   lib/call/                    CallTransport seam, MeshTransport, media, VAD, SDP munge
   lib/stores/                  per-room zustand stores (context, not singletons)

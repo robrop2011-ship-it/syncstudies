@@ -10,6 +10,8 @@
 > 3. **A conflict does not write a marker into the user's text.** §8.12 said "appending it as a new block below with a marker". The loser's text is preserved verbatim as a new block below the winner, and the *loser* is told (the ack carries `winning`); the marker is UI, not content. Putting it in the text would corrupt the document and the §3.6 S7 export.
 > 4. **The shortcut sheet is `Ctrl`/`Cmd`+`/`, not `?`.** §12.5's own key table binds `?` to "new question at current timestamp" and its prose asks for "a `?`-triggered shortcut sheet". They are the same keystroke. `?` keeps the question — it is §2.5's retention feature — and the sheet also has an entry in the room menu.
 >
+> **Amendment A4 (v1.3) — ephemeral shared ink.** Participants can draw over the video; everyone sees the stroke live and it fades out a few seconds later. It is a shared laser pointer for "look at *this* term here", not a whiteboard, and it is the first feature in the product with **no durable write at all** — no table, no Redis key, no snapshot field, no replay for late joiners. That is what lets it be the highest-frequency event family in the app (~20 messages/second per drawing user) and why it needs no moderation queue: nothing drawn can outlive the conversation it belonged to. Contract changes: eight `INK_*` constants and `DrawStroke`/`DrawClear` (§10.2), the `annotate` permission (§11.2), `rooms.annotations_enabled` so a host can switch it off (§7.2), and a new §3.6 S10. The one subtlety worth reading before touching it is in [ADR 0008](./docs/ADR/0008-ink-is-ephemeral.md): coordinates are 0..1 against the **picture**, not the stage box, because the box is not reliably 16:9 and normalising against it silently puts the same stroke on a different part of the lecture for anyone whose window is a different shape.
+>
 > **Amendment A4 (v1.2) — `uuidv7` is monotonic within a millisecond.** ADR 0007 orders the transcript by `id` and nothing else, on the grounds that "id order is time order". That was only true at millisecond granularity: the original implementation drew fresh randomness on every call, so two ids minted in the same millisecond sorted arbitrarily against each other. Stably, on every client — but not in send order, which is a real defect for a burst, a retry, or two sends from one node. `uuidv7()` now increments the entropy while the millisecond is unchanged (RFC 9562 §6.2), and `uuidv7At()` is the pure form for tests. Found by an integration test, not by review.
 >
 > **Audience:** the engineer (human or AI coding agent) who will build this.
@@ -279,6 +281,7 @@ Full design in **§9**.
 | S7 | Export session (markdown: notes + questions + checklist + timestamps) | 2 | High perceived value, ~4 hours of work. Do it early in v1.1. |
 | S8 | Pomodoro timer synced to the room | 2 | Server-anchored the same way video is — reuse §8's anchor pattern exactly. |
 | S9 | Flashcards / quizzes / AI summaries | 3 | Scope creep. No. |
+| S10 | Ephemeral shared ink over the video | **built** | Draw with a pointer or finger; everyone sees it live and each stroke fades after `INK_HOLD_MS + INK_FADE_MS`. Never persisted (ADR 0008). Coordinates are 0..1 on the picture. Host can disable per room; guests cannot draw. |
 
 ---
 ## 4. Technical architecture

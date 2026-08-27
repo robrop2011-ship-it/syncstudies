@@ -241,6 +241,21 @@ all three and the symptom is not "wrong port" — it is `bad_origin` at the hand
 the room loads and then never connects. `.claude/launch.json` therefore sets
 `"autoPort": false`; free port 3000 rather than letting the dev server pick another.
 
+**Your new socket handler does nothing, and the other client receives nothing.** Almost
+always a stale realtime process. `pnpm dev:realtime` runs under `tsx watch`, but a service
+started any other way does not reload — it answers `/health`, serves everything it already
+knew, and silently drops the event you just wrote, because Socket.IO ignores events with no
+listener. Check it before you debug the code:
+
+```bash
+ps aux | grep '[t]sx watch'            # nothing here means nothing is watching
+lsof -tiTCP:4000 -sTCP:LISTEN | xargs ps -o lstart= -p
+```
+
+Kill it and `pnpm dev:realtime` again. Note that `draw:*` and `presence:update` carry no
+ack by design, so a refusal is indistinguishable from a message that was never sent — the
+server log is the only place the truth lives.
+
 **`pnpm dev:realtime` exits with `DATABASE_URL: Required`.** `apps/realtime/.env` is
 missing. The config validator is doing its job.
 

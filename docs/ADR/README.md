@@ -1,6 +1,6 @@
 # Architecture decision records
 
-Seven decisions where the obvious choice is wrong.
+Eight decisions where the obvious choice is wrong.
 
 Each of these exists for one reason: somebody — a new contributor, a future you, a coding
 agent tidying up — would otherwise "fix" it back, and the code would break quietly. None of

@@ -8,6 +8,27 @@ schema column, the event, or the server half is already there — because buildi
 would otherwise have forced a contract change — and that finishing it is a UI job rather
 than an architecture job. Finishing one still requires moving it out of this file first.
 
+## Ink — what was deliberately left out
+
+Ephemeral ink shipped (PLAN Amendment A4, [ADR 0008](./ADR/0008-ink-is-ephemeral.md)).
+These were considered during it and left here on purpose:
+
+- **Pinned or saved annotations.** A "keep this one" stroke is a *different feature* with a
+  table, a retention policy and a moderation story — not this one growing a database call.
+  Ephemerality is precisely why ink needs no moderation queue.
+- **Colour picker and brush sizes.** Colour is per person so people can tell each other
+  apart; making it choosable breaks that and adds a control nobody asked for. Ink is a
+  pointer, not an art tool.
+- **Ink over the screen share.** Genuinely wanted, and the same problem solved the same
+  way: normalise against the shared surface instead of the video. Blocked on nothing but
+  scope. **[groundwork exists]** — the events, permission, policy column, engine and
+  overlay are all surface-agnostic.
+- **Ink over the whole browser window.** Asked for, and declined with reasons: the sidebar
+  and control bar are laid out differently for every participant and at narrow widths some
+  do not exist, so a coordinate there means nothing to anybody else.
+- **Undo.** A stroke that erases itself in four seconds does not need one; "clear mine"
+  covers the real case.
+
 ## Moved out of this file, and why
 
 **Camera video in call** and **screen sharing** were v1.1 here and are now built.
