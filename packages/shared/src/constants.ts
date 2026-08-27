@@ -77,6 +77,33 @@ export const AUDIO_MAX_BITRATE = 32_000;
 export const VIDEO_MAX_BITRATE = 500_000;
 export const SCREEN_MAX_BITRATE = 1_200_000;
 
+// ── Shared annotation ink (PLAN.md §5.4) ────────────────────────────────────
+/**
+ * Ink is a shared laser pointer, not a whiteboard: a stroke is drawn, held for a
+ * beat, fades, and is gone. Both halves of that life are counted from a SERVER
+ * timestamp, because a stroke that expires at a different moment for each person
+ * stops being the same gesture — one of them is still circling a term that
+ * vanished for everyone else.
+ */
+/** Fully opaque for this long after the stroke was born. */
+export const INK_HOLD_MS = 1_500;
+/** Then fades to nothing over this. */
+export const INK_FADE_MS = 2_500;
+export const INK_LIFETIME_MS = INK_HOLD_MS + INK_FADE_MS;
+/**
+ * Points are batched at 20 Hz rather than sent per pointer event. A pointermove
+ * stream reaches 120 Hz on a good trackpad, and six of those in one room is a
+ * message rate a study group should not have to pay for to point at a word.
+ */
+export const INK_EMIT_INTERVAL_MS = 50;
+export const INK_MAX_POINTS_PER_MESSAGE = 64;
+/** A stroke past this is truncated; a lecture-long unbroken scribble is a bug. */
+export const INK_MAX_POINTS_PER_STROKE = 400;
+/** Per room, oldest dropped first, so nobody can paper over the video. */
+export const INK_MAX_ACTIVE_STROKES = 32;
+/** CSS px at the stage's rendered size, not at the canvas backing size. */
+export const INK_STROKE_WIDTH = 3;
+
 // ── Limits ──────────────────────────────────────────────────────────────────
 export const MAX_MESSAGE_LENGTH = 2000;
 export const MAX_NOTE_LENGTH = 1000;

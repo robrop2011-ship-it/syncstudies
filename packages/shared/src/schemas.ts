@@ -101,6 +101,7 @@ export const UpdateRoomPolicyInput = z.object({
   waitForSlow: z.boolean().optional(),
   callEnabled: z.boolean().optional(),
   screenshareEnabled: z.boolean().optional(),
+  annotationsEnabled: z.boolean().optional(),
   maxParticipants: z
     .number()
     .int()
@@ -225,6 +226,34 @@ export type ChecklistToggle = z.infer<typeof ChecklistToggle>;
 
 export const ChecklistReorder = z.object({ id: Uuid, position: z.number() });
 export type ChecklistReorder = z.infer<typeof ChecklistReorder>;
+
+// ── socket: ink (the shared annotation layer) ───────────────────────────────
+/**
+ * A point on the VIDEO STAGE, normalised to 0..1 on each axis — never pixels.
+ *
+ * Every participant's window is a different size, so a pixel coordinate lands
+ * somewhere else on everyone else's lecture. The stage is 16:9 and identical for
+ * everyone, which is why it is the only surface ink covers: the sidebar, the
+ * chat and the control bar are laid out per-window and at some widths are not on
+ * screen at all, so a coordinate over one of them means nothing to anybody.
+ */
+export const InkPoint = z.object({
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+});
+export type InkPoint = z.infer<typeof InkPoint>;
+
+export const DrawStroke = z.object({
+  strokeId: z.string().min(1).max(64),
+  points: z.array(InkPoint).min(1).max(C.INK_MAX_POINTS_PER_MESSAGE),
+  /** The final batch of this stroke. Earlier batches are already drawable. */
+  done: z.boolean(),
+});
+export type DrawStroke = z.infer<typeof DrawStroke>;
+
+/** Clears the caller's own ink. It carries nothing; the sender is the subject. */
+export const DrawClear = z.object({});
+export type DrawClear = z.infer<typeof DrawClear>;
 
 // ── socket: presence & rtc ──────────────────────────────────────────────────
 export const PresencePatch = z.object({

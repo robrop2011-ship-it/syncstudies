@@ -16,6 +16,7 @@ export type Permission =
   | 'chat.delete.any'
   | 'notes.edit'
   | 'checklist.edit'
+  | 'annotate'
   | 'call.join'
   | 'screenshare'
   | 'host.kick'
@@ -32,6 +33,9 @@ const GRANTS: Record<Permission, readonly Role[]> = {
   'chat.delete.any': ['host', 'co_host'],
   'notes.edit': ['host', 'co_host', 'member'],
   'checklist.edit': ['host', 'co_host', 'member'],
+  // Guests are excluded on purpose: ink lands on top of the lecture everyone is
+  // watching, which is the one surface a passer-by should not be able to write on.
+  annotate: ['host', 'co_host', 'member'],
   'call.join': ['host', 'co_host', 'member', 'guest'],
   screenshare: ['host', 'co_host', 'member'],
   'host.kick': ['host', 'co_host'],
@@ -64,6 +68,7 @@ export interface ResolvedPermissions {
   canDeleteAnyMessage: boolean;
   canEditNotes: boolean;
   canEditChecklist: boolean;
+  canAnnotate: boolean;
   canJoinCall: boolean;
   canScreenShare: boolean;
   canModerate: boolean;

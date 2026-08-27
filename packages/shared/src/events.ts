@@ -39,6 +39,8 @@ export interface RoomPolicy {
   waitForSlow: boolean;
   callEnabled: boolean;
   screenshareEnabled: boolean;
+  /** The host's switch for the shared annotation layer, room-wide. */
+  annotationsEnabled: boolean;
   maxParticipants: number;
 }
 
@@ -197,6 +199,17 @@ export interface ClientToServerEvents {
   'checklist:reorder': (p: S.ChecklistReorder, ack: (r: Ack) => void) => void;
   'checklist:delete': (p: { id: string }, ack: (r: Ack) => void) => void;
 
+  /**
+   * Ink, and the only two events in this map that take no ack.
+   *
+   * A drawing user emits one batch every INK_EMIT_INTERVAL_MS; an ack per batch
+   * would double that traffic to confirm something the sender has already drawn
+   * on their own canvas. A batch that never arrives is invisible by design —
+   * the stroke it belonged to was going to fade in INK_LIFETIME_MS anyway.
+   */
+  'draw:stroke': (p: S.DrawStroke) => void;
+  'draw:clear': (p: S.DrawClear) => void;
+
   'presence:update': (p: S.PresencePatch) => void;
 
   'rtc:join': (p: S.RtcJoin, ack: (r: RtcJoinAck) => void) => void;
@@ -267,6 +280,22 @@ export interface ServerToClientEvents {
   'checklist:created': (p: { item: ChecklistItemView }) => void;
   'checklist:updated': (p: { item: ChecklistItemView }) => void;
   'checklist:deleted': (p: { id: string }) => void;
+
+  /**
+   * `serverMs` is the stroke's birth instant on the server clock, and it is the
+   * only time base anyone may age it against: a client aging its own strokes off
+   * `Date.now()` would watch them die at a visibly different moment from the
+   * room's. `points` are stage-normalised (see `Schemas.InkPoint`).
+   */
+  'draw:stroke': (p: {
+    from: string;
+    strokeId: string;
+    points: S.InkPoint[];
+    done: boolean;
+    serverMs: number;
+  }) => void;
+  /** That user's ink, everywhere. Nobody can clear anybody else's. */
+  'draw:cleared': (p: { userId: string }) => void;
 
   'rtc:peers': (p: { peers: NonNullable<RtcJoinAck['peers']> }) => void;
   'rtc:peer_joined': (p: { userId: string; polite: boolean }) => void;

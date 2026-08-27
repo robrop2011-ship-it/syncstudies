@@ -233,6 +233,14 @@ broken for every real user. Two shipped features were broken exactly that way; s
 
 ## 6. Things that will bite you
 
+**The web app must be on port 3000 specifically.** Three things pin it:
+`ALLOWED_ORIGINS` in `apps/realtime/.env` is an **exact-match** allowlist checked at the
+socket handshake, and `APP_ORIGIN` / `NEXT_PUBLIC_APP_URL` in `apps/web/.env` back the
+CSRF Origin check on the REST routes. Move the web app to another port without changing
+all three and the symptom is not "wrong port" — it is `bad_origin` at the handshake, so
+the room loads and then never connects. `.claude/launch.json` therefore sets
+`"autoPort": false`; free port 3000 rather than letting the dev server pick another.
+
 **`pnpm dev:realtime` exits with `DATABASE_URL: Required`.** `apps/realtime/.env` is
 missing. The config validator is doing its job.
 

@@ -406,6 +406,7 @@ function policyPatch(
   if (input.waitForSlow !== undefined) patch.waitForSlow = input.waitForSlow;
   if (input.callEnabled !== undefined) patch.callEnabled = input.callEnabled;
   if (input.screenshareEnabled !== undefined) patch.screenshareEnabled = input.screenshareEnabled;
+  if (input.annotationsEnabled !== undefined) patch.annotationsEnabled = input.annotationsEnabled;
   if (input.maxParticipants !== undefined) patch.maxParticipants = input.maxParticipants;
   return patch;
 }

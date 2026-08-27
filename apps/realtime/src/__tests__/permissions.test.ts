@@ -20,6 +20,7 @@ const basePolicy: RoomPolicy = {
   waitForSlow: false,
   callEnabled: true,
   screenshareEnabled: true,
+  annotationsEnabled: true,
   maxParticipants: 8,
 };
 

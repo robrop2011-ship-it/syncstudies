@@ -144,6 +144,9 @@ model Room {
   waitForSlow        Boolean @default(false) @map("wait_for_slow")
   callEnabled        Boolean @default(true) @map("call_enabled")
   screenshareEnabled Boolean @default(true) @map("screenshare_enabled")
+  /// The room-wide switch for the shared annotation layer. The ink itself is
+  /// never stored — this column is only whether drawing it is allowed here.
+  annotationsEnabled Boolean @default(true) @map("annotations_enabled")
 
   status       String   @default("active") @db.VarChar(16)
   lastActiveAt DateTime @default(now()) @map("last_active_at") @db.Timestamptz

@@ -16,6 +16,7 @@ shipped or seriously considered.
 | [0005](./0005-host-transfer-happens-at-removal.md) | Host transfer happens at the moment of removal, never on a separate timer. | Run a second timer for the transfer. The removal timer fires first and cancels it, leaving the room permanently hostless. |
 | [0006](./0006-chat-is-broadcast-first.md) | Chat is broadcast before it is persisted, so every read-back path must account for the queue. | Assume a message you can see is in the database. Two shipped features were broken by exactly this, and both of their tests passed. |
 | [0007](./0007-order-messages-by-id.md) | The transcript is ordered by `id`, never by `created_at`. | Order by the timestamp column, which reads better and already has an index. It is not a total order and it cannot be a cursor. |
+| [0008](./0008-ink-is-ephemeral.md) | Ink is never stored, and its coordinates are 0..1 on the **picture**, not on the stage box. | Persist the strokes so late joiners see them, and normalise against the canvas — which is not reliably 16:9, so the same 0.5 is a different part of the lecture on a differently shaped window. |
 
 ## Writing another one
 

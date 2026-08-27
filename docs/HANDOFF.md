@@ -9,9 +9,9 @@ day if nobody tells you.
 1. This file, in full. It is short.
 2. [`docs/RUNBOOK.md`](./RUNBOOK.md) — get it running before you read any code.
 3. [`PLAN.md`](../PLAN.md) — the blueprint. 20 sections. **§8 is the product.**
-4. [`docs/ADR/`](./ADR) — seven decisions where the obvious choice is wrong. Each exists
+4. [`docs/ADR/`](./ADR) — eight decisions where the obvious choice is wrong. Each exists
    because someone would otherwise "fix" it back and break something quietly.
-   [`docs/ADR/README.md`](./ADR/README.md) is a one-line index of all seven; **0006 and
+   [`docs/ADR/README.md`](./ADR/README.md) is a one-line index of all eight; **0006 and
    0007 are the two you need before you touch chat.**
 5. [`docs/BACKLOG.md`](./BACKLOG.md) — everything deliberately not being built yet.
 
@@ -103,7 +103,8 @@ host controls (kick, ban, promote, transfer, end room), watch a YouTube lecture 
 talk about it in chat — including clicking a `@41:12` to take the whole room there —
 join a voice call with camera and screen sharing, write in a shared document that other
 people are editing at the same time, pin a question to 41:12 and click its tick to bring
-the room back, and keep a shared checklist. On desktop and on mobile.
+the room back, keep a shared checklist, and **draw over the video** with strokes everyone
+sees and that fade away after a few seconds (ADR 0008). On desktop and on mobile.
 
 **Not yet:** avatar upload (see §10). Everything else in PLAN §13.2's MVP scope is built.
 

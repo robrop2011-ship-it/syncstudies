@@ -61,6 +61,7 @@ interface RoomRow {
   waitForSlow: boolean;
   callEnabled: boolean;
   screenshareEnabled: boolean;
+  annotationsEnabled: boolean;
   maxParticipants: number;
 }
 
@@ -78,6 +79,7 @@ const ROOM_SELECT = {
   waitForSlow: true,
   callEnabled: true,
   screenshareEnabled: true,
+  annotationsEnabled: true,
   maxParticipants: true,
 } as const;
 
@@ -98,6 +100,7 @@ function toMeta(row: RoomRow): RoomMeta {
       waitForSlow: row.waitForSlow,
       callEnabled: row.callEnabled,
       screenshareEnabled: row.screenshareEnabled,
+      annotationsEnabled: row.annotationsEnabled,
       maxParticipants: row.maxParticipants,
     },
     status: asStatus(row.status),
@@ -288,6 +291,7 @@ export async function updateRoomPolicy(
   if (patch.waitForSlow !== undefined) data['waitForSlow'] = patch.waitForSlow;
   if (patch.callEnabled !== undefined) data['callEnabled'] = patch.callEnabled;
   if (patch.screenshareEnabled !== undefined) data['screenshareEnabled'] = patch.screenshareEnabled;
+  if (patch.annotationsEnabled !== undefined) data['annotationsEnabled'] = patch.annotationsEnabled;
   if (patch.maxParticipants !== undefined) data['maxParticipants'] = patch.maxParticipants;
   if (Object.keys(data).length === 0) return;
   await prisma.room.update({ where: { id: roomId }, data });

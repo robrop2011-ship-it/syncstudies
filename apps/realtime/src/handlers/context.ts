@@ -135,6 +135,7 @@ export function resolvePermissions(role: Role, policy: RoomPolicy): ResolvedPerm
     canDeleteAnyMessage: can(role, 'chat.delete.any'),
     canEditNotes: can(role, 'notes.edit'),
     canEditChecklist: can(role, 'checklist.edit'),
+    canAnnotate: can(role, 'annotate') && policy.annotationsEnabled,
     canJoinCall: can(role, 'call.join') && policy.callEnabled,
     canScreenShare: can(role, 'screenshare') && policy.screenshareEnabled,
     canModerate: can(role, 'host.kick'),

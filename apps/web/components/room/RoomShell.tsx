@@ -46,6 +46,7 @@ import { Onboarding } from '@/components/room/Onboarding';
 import { FeedbackDialog } from '@/components/room/FeedbackDialog';
 import { VideoStage } from '@/components/room/VideoStage';
 import { CallProvider } from '@/lib/call/provider';
+import { InkProvider } from '@/lib/ink/provider';
 import { CallAudio } from '@/components/room/call/CallAudio';
 import { CallTiles } from '@/components/room/call/CallTiles';
 import { ScreenShareStage, useActiveShare } from '@/components/room/call/ScreenShareStage';
@@ -89,7 +90,12 @@ export function RoomShell({
           hideIpFromPeers: bootstrap.prefs.hideIpFromPeers,
         }}
       >
-        <RoomFrame bootstrap={bootstrap} />
+        {/* Ink lives inside the socket and clock providers because it needs
+            both: strokes go out over the socket, and they are aged off SERVER
+            time so the same stroke fades at the same instant for everyone. */}
+        <InkProvider selfUserId={bootstrap.viewer.id}>
+          <RoomFrame bootstrap={bootstrap} />
+        </InkProvider>
         <CallAudio />
         <RoomShortcuts />
         <Onboarding isHost={bootstrap.isHost} />

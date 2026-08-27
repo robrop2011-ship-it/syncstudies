@@ -88,6 +88,7 @@ export const PATCH = roomRoute(async (req, segment) => {
   if (input.waitForSlow !== undefined) data['waitForSlow'] = input.waitForSlow;
   if (input.callEnabled !== undefined) data['callEnabled'] = input.callEnabled;
   if (input.screenshareEnabled !== undefined) data['screenshareEnabled'] = input.screenshareEnabled;
+  if (input.annotationsEnabled !== undefined) data['annotationsEnabled'] = input.annotationsEnabled;
   // Lowering this below the current occupancy is allowed and does not evict
   // anyone: it stops the NEXT join. Kicking someone is a moderation action with
   // its own audit trail, not a side effect of editing a number.

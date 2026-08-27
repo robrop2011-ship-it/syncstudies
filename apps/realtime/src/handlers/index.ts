@@ -14,6 +14,7 @@ import { registerVideoHandlers, evaluateWaitForSlow } from './video.js';
 import { registerHostHandlers } from './host.js';
 import { registerChatHandlers } from './chat.js';
 import { registerNotesHandlers } from './notes.js';
+import { registerDrawHandlers } from './draw.js';
 import { registerRtcHandlers } from './rtc.js';
 import type { AdminDisconnectMessage, BusHandlers, RoomBusMessage } from '../rooms/bus.js';
 import { roomChannel } from './context.js';
@@ -29,6 +30,9 @@ export function registerAllHandlers(ctx: AppContext, socket: TypedSocket): void 
   registerChatHandlers(ctx, socket);
   registerNotesHandlers(ctx, socket);
   registerRtcHandlers(ctx, socket);
+
+  // Ink relays and stores nothing, so it has no service on `ctx` to wire up.
+  registerDrawHandlers(ctx, socket);
 
   // Registered last so it observes the final state of socket.data.
   registerDisconnectHandler(ctx, socket);

@@ -34,6 +34,8 @@ const EVENT_NAMES = [
   'checklist:toggle',
   'checklist:reorder',
   'checklist:delete',
+  'draw:stroke',
+  'draw:clear',
   'presence:update',
   'rtc:join',
   'rtc:leave',
@@ -86,7 +88,15 @@ const MUST_FAIL_CLOSED: readonly Listed[] = [
 ];
 
 /** Chat and presence stay available when Redis does not (§11.7). */
-const MUST_FAIL_OPEN: readonly Listed[] = ['chat:send', 'chat:typing', 'presence:update'];
+const MUST_FAIL_OPEN: readonly Listed[] = [
+  'chat:send',
+  'chat:typing',
+  'presence:update',
+  // Ink is not a security surface and is never stored; Redis being down must
+  // not take away the room's ability to point at something.
+  'draw:stroke',
+  'draw:clear',
+];
 
 describe('LIMITS', () => {
   it('is exhaustive over ClientToServerEvents', () => {
@@ -120,14 +130,15 @@ describe('LIMITS', () => {
     }
   });
 
-  it('keeps time:ping off the Redis path', () => {
-    // §8.3: the clock estimator fires eight of these on join and its accuracy
-    // depends on the reply being immediate. A Redis round-trip here would show
-    // up directly as clock-offset error.
-    expect(LIMITS['time:ping'].scope).toBe('local');
+  it('keeps the two hot paths off Redis, and nothing else', () => {
+    // Both counters are per-socket and a socket lives on one node, so the local
+    // window is the same count Redis would hold — the round trip is pure cost.
+    // §8.3: the clock estimator fires eight pings on join and its accuracy
+    // depends on an immediate reply. `draw:stroke` runs at 20/s per drawing user.
+    // Every other event pays the round trip, and this asserts the list stays short.
+    const LOCAL: readonly Listed[] = ['time:ping', 'draw:stroke'];
     for (const event of EVENT_NAMES) {
-      if (event === 'time:ping') continue;
-      expect(LIMITS[event].scope, event).toBe('redis');
+      expect(LIMITS[event].scope, event).toBe(LOCAL.includes(event) ? 'local' : 'redis');
     }
   });
 
@@ -137,6 +148,8 @@ describe('LIMITS', () => {
     expect(LIMITS['rtc:signal']).toMatchObject({ limit: 120, windowMs: 10_000 });
     expect(LIMITS['host:end_room']).toMatchObject({ limit: 2, windowMs: 60_000 });
     expect(LIMITS['time:ping']).toMatchObject({ limit: 30, windowMs: 10_000 });
+    // 50% headroom over the ~20/s an honest drawer sustains at INK_EMIT_INTERVAL_MS.
+    expect(LIMITS['draw:stroke']).toMatchObject({ limit: 30, windowMs: 1_000 });
     expect(SPEAKING_LIMIT).toMatchObject({ limit: 4, windowMs: 1_000 });
   });
 

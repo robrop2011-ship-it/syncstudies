@@ -4,8 +4,9 @@
  * The video region (PLAN.md §12.4, §8.7, §5.3).
  *
  * It owns the rectangle, the player's lifetime, and everything drawn on top of
- * the picture: the autoplay gate, the "this video refuses to be embedded" state,
- * the rejected-control pill, and the empty state with the paste-a-link form.
+ * the picture: the shared ink canvas, the autoplay gate, the "this video refuses
+ * to be embedded" state, the rejected-control pill, and the empty state with the
+ * paste-a-link form.
  *
  * **Why the player is constructed here and not in the sync layer.** The iframe
  * belongs to a DOM node, and a DOM node belongs to the component that renders
@@ -33,6 +34,8 @@ import { Lock, Youtube } from 'lucide-react';
 import type { ControlRejectReason, PlayerAdapter, PlayerErrorInfo } from '@syncstudy/shared';
 import { Button } from '@/components/ui/button';
 import { AutoplayGate } from '@/components/room/AutoplayGate';
+import { InkOverlay } from '@/components/room/InkOverlay';
+import { InkToolbar, setDrawMode, useDrawMode } from '@/components/room/InkToolbar';
 import { SetVideoForm } from '@/components/room/SetVideoForm';
 import { useJoinError, useRoomStore, useVideoAnchor } from '@/lib/stores/room-store';
 import { useServerClock } from '@/lib/sync/clock';
@@ -76,6 +79,13 @@ export function VideoStage({
   const controller = useSyncController();
   const attach = useAttachPlayer();
   const clock = useServerClock();
+  const drawing = useDrawMode();
+
+  // Draw mode is a module-level switch, so it survives leaving a room. Landing
+  // in the NEXT room with the pencil still down would put a transparent canvas
+  // over the player that quietly eats the first click on play. Put it down with
+  // the stage that owns it.
+  useEffect(() => () => setDrawMode(false), []);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<PlayerAdapter | null>(null);
@@ -157,6 +167,23 @@ export function VideoStage({
   const playerError = loadError ?? status.error;
   const showPlayer = joinError === null && hasVideo && playerError === null;
 
+  // No picture, no shared surface. An error state or the paste-a-link screen is
+  // laid out differently for everyone looking at it, so there is nothing here a
+  // coordinate could mean — and a control bar still claiming draw mode over it
+  // would be claiming something that is not on screen.
+  useEffect(() => {
+    if (!showPlayer) setDrawMode(false);
+  }, [showPlayer]);
+
+  // Draw mode is a module-level switch shared with the control bar, so the room
+  // has to hand it back when it goes: without this, walking from /r/AAAA to
+  // /r/BBBB arrives in the next room with the pencil already down.
+  useEffect(() => {
+    return () => {
+      setDrawMode(false);
+    };
+  }, []);
+
   return (
     <section
       aria-label="Video"
@@ -176,6 +203,29 @@ export function VideoStage({
         )}
       >
         <div id={PLAYER_MOUNT_ID} ref={containerRef} className="absolute inset-0" />
+
+        {/*
+          THE INK SURFACE IS THIS BOX, AND ONLY THIS BOX.
+
+          A stroke travels as x,y in 0..1 relative to the rect this div occupies
+          and is painted back against the receiver's own copy of it, so a circle
+          drawn around a term lands on that term on every screen whatever size
+          the window is. That only holds because the box is the same shape for
+          everybody: it is 16:9 at every breakpoint, and the player letterboxes
+          inside it. The sidebar, the chat and the control bar are laid out
+          differently for every participant and below `lg` some of them are not
+          on screen at all, so a coordinate over any of those means nothing to
+          anyone else — which is why "draw anywhere on the screen" is not what
+          this is, and must not become it.
+
+          Above the iframe, below the gate: someone who still has to tap "join
+          with sound" must not find a drawing surface swallowing the tap. The
+          canvas carries no z-index, so it paints over the iframe and under the
+          `z-10` gate; the toolbar is `z-10` too but sits earlier in the DOM, so
+          the gate — same layer, later — covers it while it is up.
+        */}
+        <InkOverlay drawing={drawing} />
+        <InkToolbar drawing={drawing} />
 
         <AutoplayGate
           needsGesture={showPlayer && status.needsGesture}

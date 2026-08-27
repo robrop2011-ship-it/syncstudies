@@ -19,6 +19,7 @@ const EXPECTED: Record<Permission, readonly Role[]> = {
   'chat.delete.any': ['host', 'co_host'],
   'notes.edit': ['host', 'co_host', 'member'],
   'checklist.edit': ['host', 'co_host', 'member'],
+  annotate: ['host', 'co_host', 'member'],
   'call.join': ['host', 'co_host', 'member', 'guest'],
   screenshare: ['host', 'co_host', 'member'],
   'host.kick': ['host', 'co_host'],

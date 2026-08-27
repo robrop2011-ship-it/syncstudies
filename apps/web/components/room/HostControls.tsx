@@ -60,6 +60,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useSocket } from '@/lib/socket/provider';
+import { useRoomPolicy } from '@/lib/stores/room-store';
 import { NO_SOCKET, ackWithTimeout } from '@/components/room/socket-ack';
 import { showShortcuts } from '@/components/room/ShortcutSheet';
 import { showFeedback } from '@/components/room/FeedbackDialog';
@@ -302,10 +303,18 @@ export function RoomOverflowMenu({
   playbackControl: PlaybackControlPolicy;
 }) {
   const socket = useSocket();
+  const policy = useRoomPolicy();
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const openingDialog = useRef(false);
+
+  // Read from the store rather than taken as a prop, because the checkmark has
+  // to follow the server's answer: the host toggles it here, the room broadcasts
+  // `room:updated`, and the menu shows what is actually true rather than what
+  // was clicked. Defaults to on for the ~200 ms before the snapshot lands, which
+  // is what the room is created with.
+  const annotationsEnabled = policy?.annotationsEnabled ?? true;
 
   const mayPolicy = can(myRole, 'host.policy');
   const mayEnd = can(myRole, 'host.end');
@@ -321,6 +330,23 @@ export function RoomOverflowMenu({
     }
     void ackWithTimeout((ack) =>
       socket.emit('host:update_policy', { playbackControl: next }, ack),
+    ).then((result) => {
+      if (!result.ok) toast.error(result.message);
+    });
+  }
+
+  /**
+   * The room-wide ink switch. No confirm step: turning drawing off takes nothing
+   * away that was going to survive the next four seconds anyway, and turning it
+   * back on is the same click.
+   */
+  function setAnnotations(next: boolean): void {
+    if (socket === null) {
+      toast.error(NO_SOCKET.message);
+      return;
+    }
+    void ackWithTimeout((ack) =>
+      socket.emit('host:update_policy', { annotationsEnabled: next }, ack),
     ).then((result) => {
       if (!result.ok) toast.error(result.message);
     });
@@ -410,6 +436,19 @@ export function RoomOverflowMenu({
                   {option === playbackControl ? <span className="sr-only">(current)</span> : null}
                 </DropdownMenuItem>
               ))}
+
+              <DropdownMenuLabel>Drawing</DropdownMenuLabel>
+              <DropdownMenuItem onSelect={() => setAnnotations(!annotationsEnabled)}>
+                {annotationsEnabled ? (
+                  <Check size={16} strokeWidth={1.5} aria-hidden="true" className="text-accent" />
+                ) : (
+                  <span aria-hidden="true" className="inline-block h-4 w-4" />
+                )}
+                Anyone can draw on the video
+                {/* The tick is the only visual difference between the two
+                    states, and §12.6 forbids leaving it at that. */}
+                <span className="sr-only">{annotationsEnabled ? '(on)' : '(off)'}</span>
+              </DropdownMenuItem>
             </>
           ) : null}
 

@@ -31,8 +31,15 @@ export interface RateRule {
   /** Redis unreachable → allow (true) or reject (false). */
   failOpen: boolean;
   /**
-   * `local` never touches Redis. Reserved for `time:ping`, which must stay the
-   * cheapest handler in the process (§8.3 runs eight of them on every join).
+   * `local` never touches Redis.
+   *
+   * It is not a weaker limit: the counter is keyed by socket id, and a socket
+   * lives on exactly one node for its whole life, so the in-process window holds
+   * the same count the Redis one would. What Redis buys for a per-socket key is
+   * nothing; what it costs is a round trip. Reserved for the two events where
+   * that round trip is the dominant expense — `time:ping` (§8.3 fires eight of
+   * them on every join and the offset estimate depends on an immediate reply)
+   * and `draw:stroke` (20 batches a second per drawing user).
    */
   scope: 'redis' | 'local';
 }
@@ -71,6 +78,30 @@ export const LIMITS: Record<keyof ClientToServerEvents, RateRule> = {
   'checklist:reorder': { limit: 40, windowMs: 60_000, failOpen: true, scope: 'redis' },
   // §10.2 lists no limit; destructive, so fail closed.
   'checklist:delete': { limit: 20, windowMs: 60_000, failOpen: false, scope: 'redis' },
+
+  /**
+   * The highest-frequency event in the product, and the only room event with a
+   * per-second window.
+   *
+   * INK_EMIT_INTERVAL_MS is 50, so an honest drawer sustains ~20/s. 30 is 50%
+   * headroom, which matters more here than the exact ceiling: a breach is a
+   * strike, and three strikes disconnect the socket (§11.7). Being thrown out of
+   * a study room for drawing enthusiastically would be a far worse bug than the
+   * flood this limit exists to stop.
+   *
+   * `local` scope and failOpen for the same reason: ink is not a security
+   * surface. A stroke is two normalised numbers per point, it is never stored,
+   * and it is gone INK_LIFETIME_MS after it was drawn — there is nothing here to
+   * steal or to corrupt. The ceiling on abuse is the receiver's PER-AUTHOR cap
+   * on active strokes (`insert` in apps/web/lib/ink/controller.ts): a client
+   * minting fresh stroke ids at this limit can only ever evict its own ink, not
+   * anybody else's, so flooding costs the flooder and nobody else. Compare
+   * `rtc:ice_refresh`, where the same reasoning runs the other way and a leak
+   * costs real money.
+   */
+  'draw:stroke': { limit: 30, windowMs: 1_000, failOpen: true, scope: 'local' },
+  // Rare and idempotent — it only ever clears the caller's own ink.
+  'draw:clear': { limit: 10, windowMs: 10_000, failOpen: true, scope: 'redis' },
 
   'presence:update': { limit: 10, windowMs: 10_000, failOpen: true, scope: 'redis' },
 

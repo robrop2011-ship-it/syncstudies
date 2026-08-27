@@ -4,10 +4,12 @@
  * The video control bar (PLAN.md §12.4, §12.5, §8.5a, §5.4).
  *
  * One row, ordered left to right by how often it is used: play/pause, ±10 s, the
- * time, volume, then the sync status. Above it, our own scrubber. Everything in
- * here states an *intent* to the `SyncController` and then waits to be told what
- * is true — no button reaches for the player directly, because the server owns
- * the timeline (§8.1 rule 1).
+ * time, volume, the draw toggle, then the sync status. Above it, our own
+ * scrubber. Everything in here states an *intent* to the `SyncController` and
+ * then waits to be told what is true — no button reaches for the player
+ * directly, because the server owns the timeline (§8.1 rule 1). The pencil is
+ * the one exception, and only because ink is not part of the timeline: it turns
+ * on a local drawing surface and nothing about playback changes.
  *
  * Two details worth keeping:
  *
@@ -26,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Lock,
   Pause,
+  Pencil,
   Play,
   RotateCcw,
   RotateCw,
@@ -35,6 +38,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import {
+  can,
   clientId,
   formatTimestamp,
   type MessageView,
@@ -44,8 +48,10 @@ import { toast } from 'sonner';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Scrubber, type ScrubberTick } from '@/components/room/Scrubber';
 import { SyncStatus } from '@/components/room/SyncStatus';
-import { useVideoAnchor } from '@/lib/stores/room-store';
+import { setDrawMode, useDrawMode } from '@/components/room/InkToolbar';
+import { useMyPermissions, useRoomPolicy, useVideoAnchor } from '@/lib/stores/room-store';
 import { useSocket } from '@/lib/socket/provider';
+import { useInk } from '@/lib/ink/provider';
 import { useCall } from '@/lib/call/provider';
 import { ackWithTimeout } from '@/components/room/socket-ack';
 import type { SyncController } from '@/lib/sync/controller';
@@ -74,9 +80,47 @@ function whoCanControl(policy: PlaybackControlPolicy, hostName: string): string 
   }
 }
 
+/**
+ * Why the pencil is disabled, or `null` when it is not (§11.2, §12.1 rule 10).
+ *
+ * The pencil is never hidden. A control that is present for one person and
+ * absent for the next reads as a bug in the room rather than as a rule about
+ * this room, and the person it is missing for is exactly the person who needs
+ * the sentence explaining why.
+ *
+ * "We do not know yet" is a different claim from "you may not": until the
+ * snapshot lands there is no role and no policy, and answering that window with
+ * "the host turned drawing off" would put a lie under every freshly opened room.
+ */
+function whyNoDrawing(state: {
+  hasVideo: boolean;
+  ready: boolean;
+  mayAnnotate: boolean;
+  annotationsEnabled: boolean;
+  hostName: string;
+}): string | null {
+  if (!state.hasVideo) return 'No video yet';
+  if (!state.ready) return 'Still connecting';
+  // Policy BEFORE role, and `mayAnnotate` is a role-only test.
+  //
+  // The server's `canAnnotate` folds both facts together
+  // (`can(role,'annotate') && policy.annotationsEnabled`), so feeding it in here
+  // made every member — the host included — read "Guests cannot draw" the moment
+  // drawing was switched off for the room. Telling the host they are a guest is
+  // worse than saying nothing.
+  if (!state.annotationsEnabled) return `${state.hostName} turned drawing off in this room`;
+  if (!state.mayAnnotate) return 'Guests cannot draw on the video';
+  return null;
+}
+
 // ── keyboard (§12.5) ────────────────────────────────────────────────────────
 //
-// Space, ←/→ and J/L are bound below. `C` (captions) is NOT, and that is a gap
+// Space, ←/→, J/L and `D` are bound below. `D` is here rather than in
+// `ShortcutSheet` because the pencil it toggles is a control in this bar, and a
+// key whose typing guard lives in one file and whose button lives in another
+// drifts apart the first time either one changes.
+//
+// `C` (captions) is NOT bound, and that is a gap
 // rather than an oversight: `PlayerAdapter` exposes no caption control, so there
 // is nothing for the key to call. Wiring it needs `toggleCaptions()` on the
 // interface in packages/shared/src/player.ts, an implementation in the YouTube
@@ -127,6 +171,10 @@ export function PlayerControls({
   const status = useSyncStatus();
   const controller = useSyncController();
   const playheadRef = usePlayheadRef();
+  const permissions = useMyPermissions();
+  const policy = useRoomPolicy();
+  const ink = useInk();
+  const drawing = useDrawMode();
 
   const socket = useSocket();
   // §12.5: with push-to-talk on, Space is the talk key and no longer toggles
@@ -143,6 +191,15 @@ export function PlayerControls({
   const hasVideo = video.provider !== 'none' && video.videoRef !== null;
   const duration = video.durationSec ?? probedDuration;
   const enabled = canControl && hasVideo && controller !== null;
+
+  const drawBlocked = whyNoDrawing({
+    hasVideo,
+    ready: permissions !== null && policy !== null && ink !== null,
+    mayAnnotate: permissions !== null && can(permissions.role, 'annotate'),
+    annotationsEnabled: policy?.annotationsEnabled ?? true,
+    hostName,
+  });
+  const canDraw = drawBlocked === null;
 
   // The optimistic icon, and its deadline.
   useEffect(() => {
@@ -186,6 +243,15 @@ export function PlayerControls({
   useEffect(() => {
     if (canControl) setRequested(false);
   }, [canControl]);
+
+  // Losing the right to draw has to put the pencil down as well as grey it out —
+  // a demotion to guest, the host switching ink off mid-session, or the video
+  // being cleared. Otherwise draw mode stays on over a stage whose strokes the
+  // server will refuse one by one, and the only visible symptom is that nothing
+  // appears.
+  useEffect(() => {
+    if (!canDraw) setDrawMode(false);
+  }, [canDraw]);
 
   const showPlaying = pending === null ? video.status === 'playing' : pending === 'playing';
 
@@ -240,10 +306,15 @@ export function PlayerControls({
     [controller, duration, enabled, playheadRef],
   );
 
+  const toggleDraw = useCallback((): void => {
+    if (!canDraw) return;
+    setDrawMode(!drawing);
+  }, [canDraw, drawing]);
+
   // Room-wide shortcuts. The handlers are read from a ref so the listener is
   // attached once for the life of the room rather than on every render.
-  const actions = useRef({ toggle, seekBy });
-  actions.current = { toggle, seekBy };
+  const actions = useRef({ toggle, seekBy, toggleDraw });
+  actions.current = { toggle, seekBy, toggleDraw };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -276,6 +347,14 @@ export function PlayerControls({
         case 'l':
         case 'L':
           actions.current.seekBy(SKIP_STEP_SEC);
+          return;
+        // Guarded by the same `isTypingTarget` check above as Space, which is
+        // the whole reason it lives in this listener: `D` is a letter people
+        // type constantly in the chat box and the notes.
+        case 'd':
+        case 'D':
+          event.preventDefault();
+          actions.current.toggleDraw();
           return;
         default:
       }
@@ -346,6 +425,15 @@ export function PlayerControls({
         <VolumeControl
           controller={controller}
           unavailable={hasVideo ? 'the player is still loading' : 'no video yet'}
+        />
+
+        <ControlButton
+          icon={Pencil}
+          label={drawing ? 'Stop drawing on the video' : 'Draw on the video'}
+          hint={drawBlocked ?? (drawing ? 'Stop drawing · D' : 'Draw on the video · D')}
+          disabled={!canDraw}
+          pressed={drawing}
+          onClick={toggleDraw}
         />
 
         <div className="min-w-2 flex-1" />
@@ -419,12 +507,18 @@ function ControlButton({
   label,
   hint,
   disabled,
+  pressed,
   onClick,
 }: {
   icon: LucideIcon;
   label: string;
   hint: string;
   disabled: boolean;
+  /**
+   * Only the toggles pass this. `aria-pressed` on Play or Back-10 would claim
+   * they have an on state, and a screen reader would then announce one.
+   */
+  pressed?: boolean | undefined;
   onClick: () => void;
 }) {
   return (
@@ -436,12 +530,17 @@ function ControlButton({
             onClick={onClick}
             disabled={disabled}
             aria-label={disabled ? `${label} — ${hint}` : label}
+            aria-pressed={pressed}
             className={cn(
               'inline-flex h-11 w-11 items-center justify-center rounded-md border lg:h-9 lg:w-9',
               'transition-colors duration-120 ease-standard',
               disabled
                 ? 'border-border text-tertiary opacity-50'
-                : 'border-border-strong text-primary hover:bg-surface-2',
+                : pressed === true
+                  ? // The same "on" treatment the mic and camera toggles use, so
+                    // one pressed control in the room looks like every other one.
+                    'border-border-strong bg-surface-2 text-primary hover:bg-surface-3'
+                  : 'border-border-strong text-primary hover:bg-surface-2',
             )}
           >
             <Icon size={16} strokeWidth={1.5} aria-hidden="true" />

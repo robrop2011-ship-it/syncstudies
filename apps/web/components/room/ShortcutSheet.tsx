@@ -3,11 +3,13 @@
 /**
  * Room-wide keyboard shortcuts and the sheet that lists them (PLAN.md §12.5).
  *
- * Playback keys (Space, ←/→, J/L) live in `PlayerControls`, which owns the
- * player; the `?` question key lives in `AddNoteDialog`, which owns the
- * timestamp. What is left — the ones that belong to no single control — is here,
- * along with the sheet, because a shortcut list that is maintained somewhere
- * other than the shortcuts themselves goes stale within a week.
+ * The video keys (Space, ←/→, J/L, and `D` for draw mode) live in
+ * `PlayerControls`, which owns the player and the pencil; the `?` question key
+ * lives in `AddNoteDialog`, which owns the timestamp; `Esc`-to-stop-drawing
+ * lives in `InkToolbar`, which is only mounted while there is drawing to stop.
+ * What is left — the ones that belong to no single control — is here, along with
+ * the sheet, because a shortcut list that is maintained somewhere other than the
+ * shortcuts themselves goes stale within a week.
  *
  * **One deviation from §12.5, deliberate.** The plan binds `?` to *both* "new
  * question at the current timestamp" and "open the shortcut sheet". They are the
@@ -116,6 +118,7 @@ export function RoomShortcuts() {
             </Row>
             <Row keys={['←', '→']} label="Back or forward 5 seconds" />
             <Row keys={['J', 'L']} label="Back or forward 10 seconds" />
+            <Row keys={['D']} label="Draw on the video for everyone" />
           </Group>
 
           <Group title="Notes and chat">
@@ -133,7 +136,7 @@ export function RoomShortcuts() {
 
           <Group title="Everything else">
             <Row keys={['Ctrl', '/']} label="Open this sheet" />
-            <Row keys={['Esc']} label="Close a dialog or menu" />
+            <Row keys={['Esc']} label="Close a dialog, a menu, or draw mode" />
           </Group>
         </div>
 
